@@ -1,4 +1,4 @@
-# Copyright 2015 tsuru authors. All rights reserved.
+# Copyright 2016 tsuru authors. All rights reserved.
 # Use of this source code is governed by a BSD-style
 # license that can be found in the LICENSE file.
 
@@ -6,30 +6,9 @@ BUILD_DIR = build
 TSR_BIN = $(BUILD_DIR)/tsurud
 TSR_SRC = cmd/tsurud/*.go
 
-define HG_ERROR
+.PHONY: all check-path test race docs
 
-FATAL: You need Mercurial (hg) to download tsuru dependencies.
-       For more details, please check
-       http://docs.tsuru.io/en/latest/contribute/setting-up-your-tsuru-development-environment.html#installing-git-bzr-and-mercurial
-endef
-
-define GIT_ERROR
-
-FATAL: You need Git to download tsuru dependencies.
-       For more details, please check
-       http://docs.tsuru.io/en/latest/contribute/setting-up-your-tsuru-development-environment.html#installing-git-bzr-and-mercurial
-endef
-
-define BZR_ERROR
-
-FATAL: You need Bazaar (bzr) to download tsuru dependencies.
-       For more details, please check
-       http://docs.tsuru.io/en/latest/contribute/setting-up-your-tsuru-development-environment.html#installing-git-bzr-and-mercurial
-endef
-
-.PHONY: all check-path get hg git bzr get-code test race
-
-all: check-path get test
+all: check-path test
 
 # It does not support GOPATH with multiple paths.
 check-path:
@@ -47,24 +26,6 @@ ifneq ($(subst ~,$(HOME),$(GOPATH))/src/github.com/tsuru/tsuru, $(PWD))
 endif
 	@exit 0
 
-get: hg git bzr get-code godep
-
-hg:
-	$(if $(shell hg), , $(error $(HG_ERROR)))
-
-git:
-	$(if $(shell git), , $(error $(GIT_ERROR)))
-
-bzr:
-	$(if $(shell bzr), , $(error $(BZR_ERROR)))
-
-get-code:
-	go get $(GO_EXTRAFLAGS) -d -t ./... || true
-
-godep:
-	go get $(GO_EXTRAFLAGS) github.com/tools/godep
-	godep restore ./...
-
 _go_test:
 	go clean $(GO_EXTRAFLAGS) ./...
 	go test $(GO_EXTRAFLAGS) ./...
@@ -77,10 +38,10 @@ _tsurud_dry:
 test: _go_test _tsurud_dry
 
 _install_deadcode: git
-	go get $(GO_EXTRAFLAGS) github.com/remyoudompheng/go-misc/deadcode
+	go get $(GO_EXTRAFLAGS) github.com/reillywatson/go-misc/deadcode
 
 deadcode: _install_deadcode
-	@go list ./... | sed -e 's;github.com/tsuru/tsuru/;;' | xargs deadcode
+	@go list ./... | sed -e 's;github.com/tsuru/tsuru/;;' | grep -v vendor/ | xargs deadcode
 
 deadc0de: deadcode
 
@@ -95,6 +56,8 @@ race:
 
 doc:
 	@cd docs && make html SPHINXOPTS="-N -W"
+
+docs: doc
 
 release:
 	@if [ ! $(version) ]; then \
@@ -139,7 +102,7 @@ binaries: tsurud
 tsurud: $(TSR_BIN)
 
 $(TSR_BIN):
-	godep go build -o $(TSR_BIN) $(TSR_SRC)
+	go build -o $(TSR_BIN) $(TSR_SRC)
 
 run-tsurud-api: $(TSR_BIN)
 	$(TSR_BIN) api

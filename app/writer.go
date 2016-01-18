@@ -1,4 +1,4 @@
-// Copyright 2015 tsuru authors. All rights reserved.
+// Copyright 2016 tsuru authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -6,7 +6,7 @@ package app
 
 import (
 	"errors"
-	"sync/atomic"
+	"sync"
 	"time"
 
 	"github.com/tsuru/tsuru/log"
@@ -21,7 +21,8 @@ type LogWriter struct {
 	Source string
 	msgCh  chan []byte
 	doneCh chan bool
-	closed int32
+	closed bool
+	finLk  sync.RWMutex
 }
 
 func (w *LogWriter) Async() {
@@ -33,14 +34,15 @@ func (w *LogWriter) Async() {
 			err := w.write(msg)
 			if err != nil {
 				log.Errorf("[LogWriter] failed to write async logs: %s", err)
-				return
 			}
 		}
 	}()
 }
 
 func (w *LogWriter) Close() {
-	atomic.StoreInt32(&w.closed, 1)
+	w.finLk.Lock()
+	defer w.finLk.Unlock()
+	w.closed = true
 	if w.msgCh != nil {
 		close(w.msgCh)
 	}
@@ -60,7 +62,9 @@ func (w *LogWriter) Wait(timeout time.Duration) error {
 
 // Write writes and logs the data.
 func (w *LogWriter) Write(data []byte) (int, error) {
-	if atomic.LoadInt32(&w.closed) == 1 {
+	w.finLk.RLock()
+	defer w.finLk.RUnlock()
+	if w.closed {
 		return len(data), nil
 	}
 	if w.msgCh == nil {

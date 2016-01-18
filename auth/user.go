@@ -29,7 +29,7 @@ var (
 	ErrKeyDisabled  = stderrors.New("key management is disabled")
 )
 
-type roleInstance struct {
+type RoleInstance struct {
 	Name         string
 	ContextValue string
 }
@@ -39,22 +39,53 @@ type User struct {
 	Email    string
 	Password string
 	APIKey   string
-	Roles    []roleInstance `bson:",omitempty"`
+	Roles    []RoleInstance `bson:",omitempty"`
 }
 
-// ListUsers list all users registred in tsuru
-func ListUsers() ([]User, error) {
+func listUsers(filter bson.M) ([]User, error) {
 	conn, err := db.Conn()
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Close()
 	var users []User
-	err = conn.Users().Find(nil).All(&users)
+	err = conn.Users().Find(filter).All(&users)
 	if err != nil {
 		return nil, err
 	}
 	return users, nil
+}
+
+// ListUsers list all users registred in tsuru
+func ListUsers() ([]User, error) {
+	return listUsers(nil)
+}
+
+func ListUsersWithRole(role string) ([]User, error) {
+	return listUsers(bson.M{"roles.name": role})
+}
+
+func ListUsersWithPermissions(wantedPerms ...permission.Permission) ([]User, error) {
+	allUsers, err := ListUsers()
+	if err != nil {
+		return nil, err
+	}
+	var filteredUsers []User
+	// TODO(cezarsa): Too slow! Think about faster implementation in the future.
+usersLoop:
+	for _, u := range allUsers {
+		perms, err := u.Permissions()
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range wantedPerms {
+			if permission.CheckFromPermList(perms, p.Scheme, p.Context) {
+				filteredUsers = append(filteredUsers, u)
+				continue usersLoop
+			}
+		}
+	}
+	return filteredUsers, nil
 }
 
 func GetUserByEmail(email string) (*User, error) {
@@ -94,8 +125,13 @@ func (u *User) Create() error {
 	err = u.createOnRepositoryManager()
 	if err != nil {
 		u.Delete()
+		return err
 	}
-	return err
+	err = u.AddRolesForEvent(permission.RoleEventUserCreate, "")
+	if err != nil {
+		log.Errorf("unable to add default roles during user creation for %q: %s", u.Email, err)
+	}
+	return nil
 }
 
 func (u *User) Delete() error {
@@ -124,21 +160,6 @@ func (u *User) Update() error {
 	return conn.Users().Update(bson.M{"email": u.Email}, u)
 }
 
-// Teams returns a slice containing all teams that the user is member of.
-func (u *User) Teams() ([]Team, error) {
-	conn, err := db.Conn()
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Close()
-	var teams []Team
-	err = conn.Teams().Find(bson.M{"users": u.Email}).All(&teams)
-	if err != nil {
-		return nil, err
-	}
-	return teams, nil
-}
-
 func (u *User) AddKey(key repository.Key, force bool) error {
 	if mngr, ok := repository.Manager().(repository.KeyRepositoryManager); ok {
 		if key.Name == "" {
@@ -158,46 +179,6 @@ func (u *User) RemoveKey(key repository.Key) error {
 		return mngr.RemoveKey(u.Email, key)
 	}
 	return ErrKeyDisabled
-}
-
-func (u *User) IsAdmin() bool {
-	adminTeamName, err := config.GetString("admin-team")
-	if err != nil {
-		return false
-	}
-	teams, err := u.Teams()
-	if err != nil {
-		return false
-	}
-	for _, t := range teams {
-		if t.Name == adminTeamName {
-			return true
-		}
-	}
-	return false
-}
-
-func (u *User) AllowedApps() ([]string, error) {
-	conn, err := db.Conn()
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Close()
-	var alwdApps []map[string]string
-	teams, err := u.Teams()
-	if err != nil {
-		return nil, err
-	}
-	teamNames := GetTeamsNames(teams)
-	q := bson.M{"teams": bson.M{"$in": teamNames}}
-	if err := conn.Apps().Find(q).Select(bson.M{"name": 1}).All(&alwdApps); err != nil {
-		return nil, err
-	}
-	appNames := make([]string, len(alwdApps))
-	for i, v := range alwdApps {
-		appNames[i] = v["name"]
-	}
-	return appNames, nil
 }
 
 func (u *User) ListKeys() (map[string]string, error) {
@@ -255,12 +236,18 @@ func (u *User) reload() error {
 
 func (u *User) Permissions() ([]permission.Permission, error) {
 	var permissions []permission.Permission
+	roles := make(map[string]*permission.Role)
 	for _, roleData := range u.Roles {
-		role, err := permission.FindRole(roleData.Name)
-		if err != nil {
-			return nil, err
+		role := roles[roleData.Name]
+		if role == nil {
+			foundRole, err := permission.FindRole(roleData.Name)
+			if err != nil {
+				return nil, err
+			}
+			role = &foundRole
+			roles[roleData.Name] = role
 		}
-		permissions = append(permissions, role.PermisionsFor(roleData.ContextValue)...)
+		permissions = append(permissions, role.PermissionsFor(roleData.ContextValue)...)
 	}
 	return permissions, nil
 }
@@ -279,10 +266,10 @@ func (u *User) AddRole(roleName string, contextValue string) error {
 		"$addToSet": bson.M{
 			// Order matters in $addToSet, that's why bson.D is used instead
 			// of bson.M.
-			"roles": bson.D{
-				{"name", roleName},
-				{"contextvalue", contextValue},
-			},
+			"roles": bson.D([]bson.DocElem{
+				{Name: "name", Value: roleName},
+				{Name: "contextvalue", Value: contextValue},
+			}),
 		},
 	})
 	if err != nil {
@@ -299,14 +286,28 @@ func (u *User) RemoveRole(roleName string, contextValue string) error {
 	defer conn.Close()
 	err = conn.Users().Update(bson.M{"email": u.Email}, bson.M{
 		"$pull": bson.M{
-			"roles": bson.D{
-				{"name", roleName},
-				{"contextvalue", contextValue},
-			},
+			"roles": bson.D([]bson.DocElem{
+				{Name: "name", Value: roleName},
+				{Name: "contextvalue", Value: contextValue},
+			}),
 		},
 	})
 	if err != nil {
 		return err
 	}
 	return u.reload()
+}
+
+func (u *User) AddRolesForEvent(roleEvent *permission.RoleEvent, contextValue string) error {
+	roles, err := permission.ListRolesForEvent(roleEvent)
+	if err != nil {
+		return fmt.Errorf("unable to list roles: %s", err)
+	}
+	for _, r := range roles {
+		err = u.AddRole(r.Name, contextValue)
+		if err != nil {
+			return fmt.Errorf("unable to add role: %s", err)
+		}
+	}
+	return nil
 }

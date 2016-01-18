@@ -9,9 +9,9 @@ import (
 	"os"
 	"path"
 
+	"github.com/tsuru/gnuflag"
 	"github.com/tsuru/tsuru/fs/fstest"
 	"gopkg.in/check.v1"
-	"launchpad.net/gnuflag"
 )
 
 func (s *S) TestJoinWithUserDir(c *check.C) {
@@ -36,7 +36,7 @@ func (s *S) TestWriteToken(c *check.C) {
 	}()
 	err := writeToken("abc")
 	c.Assert(err, check.IsNil)
-	tokenPath := JoinWithUserDir(".tsuru_token")
+	tokenPath := JoinWithUserDir(".tsuru", "token")
 	c.Assert(err, check.IsNil)
 	c.Assert(rfs.HasAction("create "+tokenPath), check.Equals, true)
 	fil, _ := fsystem.Open(tokenPath)
@@ -53,7 +53,7 @@ func (s *S) TestReadToken(c *check.C) {
 	}()
 	token, err := ReadToken()
 	c.Assert(err, check.IsNil)
-	tokenPath := JoinWithUserDir(".tsuru_token")
+	tokenPath := JoinWithUserDir(".tsuru", "token")
 	c.Assert(err, check.IsNil)
 	c.Assert(rfs.HasAction("open "+tokenPath), check.Equals, true)
 	c.Assert(token, check.Equals, "123")

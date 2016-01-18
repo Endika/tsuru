@@ -1,4 +1,4 @@
-// Copyright 2015 tsuru authors. All rights reserved.
+// Copyright 2016 tsuru authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -21,6 +21,7 @@ import (
 	"github.com/tsuru/tsuru/app/bind"
 	"github.com/tsuru/tsuru/auth"
 	"github.com/tsuru/tsuru/errors"
+	"github.com/tsuru/tsuru/permission"
 	"github.com/tsuru/tsuru/provision"
 	"github.com/tsuru/tsuru/provision/provisiontest"
 	"github.com/tsuru/tsuru/quota"
@@ -94,8 +95,9 @@ func (s *S) TestDelete(c *check.C) {
 
 func (s *S) TestDeleteWithDeploys(c *check.C) {
 	a := App{
-		Name:     "ritual",
-		Platform: "python",
+		Name:      "ritual",
+		Platform:  "python",
+		TeamOwner: s.team.Name,
 	}
 	err := CreateApp(&a, s.user)
 	c.Assert(err, check.IsNil)
@@ -121,7 +123,7 @@ func (s *S) TestDeleteWithDeploys(c *check.C) {
 }
 
 func (s *S) TestDeleteWithoutUnits(c *check.C) {
-	app := App{Name: "x4", Platform: "python"}
+	app := App{Name: "x4", Platform: "python", TeamOwner: s.team.Name}
 	err := CreateApp(&app, s.user)
 	c.Assert(err, check.IsNil)
 	defer s.provisioner.Destroy(&app)
@@ -165,8 +167,9 @@ func (s *S) TestDeleteSwappedApp(c *check.C) {
 
 func (s *S) TestCreateApp(c *check.C) {
 	a := App{
-		Name:     "appname",
-		Platform: "python",
+		Name:      "appname",
+		Platform:  "python",
+		TeamOwner: s.team.Name,
 	}
 	expectedHost := "localhost"
 	config.Set("host", expectedHost)
@@ -195,8 +198,9 @@ func (s *S) TestCreateApp(c *check.C) {
 
 func (s *S) TestCreateAppDefaultPlan(c *check.C) {
 	a := App{
-		Name:     "appname",
-		Platform: "python",
+		Name:      "appname",
+		Platform:  "python",
+		TeamOwner: s.team.Name,
 	}
 	expectedHost := "localhost"
 	config.Set("host", expectedHost)
@@ -218,8 +222,9 @@ func (s *S) TestCreateAppWithoutDefaultPlan(c *check.C) {
 	s.conn.Plans().RemoveAll(nil)
 	defer s.conn.Plans().Insert(s.defaultPlan)
 	a := App{
-		Name:     "appname",
-		Platform: "python",
+		Name:      "appname",
+		Platform:  "python",
+		TeamOwner: s.team.Name,
 	}
 	expectedHost := "localhost"
 	config.Set("host", expectedHost)
@@ -245,7 +250,7 @@ func (s *S) TestCreateAppWithoutDefaultPlan(c *check.C) {
 func (s *S) TestCreateAppWithExplicitPlan(c *check.C) {
 	myPlan := Plan{
 		Name:     "myplan",
-		Memory:   1,
+		Memory:   4194304,
 		Swap:     2,
 		CpuShare: 3,
 	}
@@ -253,9 +258,10 @@ func (s *S) TestCreateAppWithExplicitPlan(c *check.C) {
 	c.Assert(err, check.IsNil)
 	defer PlanRemove(myPlan.Name)
 	a := App{
-		Name:     "appname",
-		Platform: "python",
-		Plan:     Plan{Name: "myplan"},
+		Name:      "appname",
+		Platform:  "python",
+		Plan:      Plan{Name: "myplan"},
+		TeamOwner: s.team.Name,
 	}
 	expectedHost := "localhost"
 	config.Set("host", expectedHost)
@@ -273,7 +279,7 @@ func (s *S) TestCreateAppWithExplicitPlan(c *check.C) {
 }
 
 func (s *S) TestCreateAppUserQuotaExceeded(c *check.C) {
-	app := App{Name: "america", Platform: "python"}
+	app := App{Name: "america", Platform: "python", TeamOwner: s.team.Name}
 	s.conn.Users().Update(
 		bson.M{"email": s.user.Email},
 		bson.M{"$set": bson.M{"quota.limit": 0}},
@@ -297,25 +303,6 @@ func (s *S) TestCreateAppTeamOwner(c *check.C) {
 	c.Assert(app.TeamOwner, check.Equals, "tsuruteam")
 }
 
-func (s *S) TestCreateAppTeamOwnerOneTeam(c *check.C) {
-	app := App{Name: "america", Platform: "python"}
-	err := CreateApp(&app, s.user)
-	c.Assert(err, check.IsNil)
-	defer Delete(&app, nil)
-	c.Assert(app.TeamOwner, check.Equals, "tsuruteam")
-}
-
-func (s *S) TestCreateAppTeamOwnerMoreTeamShouldReturnError(c *check.C) {
-	app := App{Name: "america", Platform: "python"}
-	team := auth.Team{Name: "tsurutwo", Users: []string{s.user.Email}}
-	err := s.conn.Teams().Insert(team)
-	c.Check(err, check.IsNil)
-	defer s.conn.Teams().RemoveId(team.Name)
-	err = CreateApp(&app, s.user)
-	c.Assert(err, check.NotNil)
-	c.Assert(err, check.FitsTypeOf, ManyTeamsError{})
-}
-
 func (s *S) TestCreateAppTeamOwnerTeamNotFound(c *check.C) {
 	app := App{
 		Name:      "someapp",
@@ -327,83 +314,21 @@ func (s *S) TestCreateAppTeamOwnerTeamNotFound(c *check.C) {
 	c.Assert(err.Error(), check.Equals, "team not found")
 }
 
-func (s *S) TestCreateAppWithDisabledPlatformAndNotAdminUser(c *check.C) {
-	platform := Platform{Name: "ruby20", Disabled: true}
-	s.conn.Platforms().Insert(platform)
-	a := App{
-		Name:     "appname",
-		Platform: "ruby20",
-	}
-	expectedHost := "localhost"
-	config.Set("host", expectedHost)
-	s.conn.Users().Update(bson.M{"email": s.user.Email}, bson.M{"$set": bson.M{"quota.limit": 1}})
-	defer s.conn.Users().Update(bson.M{"email": s.user.Email}, bson.M{"$set": bson.M{"quota.limit": -1}})
-	config.Set("quota:units-per-app", 3)
-	defer config.Unset("quota:units-per-app")
-	err := CreateApp(&a, s.user)
-	c.Assert(err, check.NotNil)
-	c.Assert(err, check.ErrorMatches, InvalidPlatformError{}.Error())
-	defer Delete(&a, nil)
-}
-
-func (s *S) TestCreateAppWithDisabledPlatformAndIsAdminUser(c *check.C) {
-	platform := Platform{Name: "ruby20", Disabled: true}
-	s.conn.Platforms().Insert(platform)
-	a := App{
-		Name:     "adminappname",
-		Platform: "ruby20",
-	}
-	expectedHost := "localhost"
-	config.Set("host", expectedHost)
-	s.createAdminUserAndTeam(c)
-	defer s.removeAdminUserAndTeam(c)
-	s.conn.Users().Update(bson.M{"email": s.admin.Email}, bson.M{"$set": bson.M{"quota.limit": 1}})
-	defer s.conn.Users().Update(bson.M{"email": s.admin.Email}, bson.M{"$set": bson.M{"quota.limit": -1}})
-	config.Set("quota:units-per-app", 3)
-	defer config.Unset("quota:units-per-app")
-	err := CreateApp(&a, s.admin)
-	c.Assert(err, check.IsNil)
-	defer Delete(&a, nil)
-	retrievedApp, err := GetByName(a.Name)
-	c.Assert(err, check.IsNil)
-	c.Assert(retrievedApp.Name, check.Equals, a.Name)
-	c.Assert(retrievedApp.Platform, check.Equals, a.Platform)
-	c.Assert(retrievedApp.Teams, check.DeepEquals, []string{s.adminTeam.Name})
-	c.Assert(retrievedApp.Owner, check.Equals, s.admin.Email)
-	env := retrievedApp.InstanceEnv("")
-	c.Assert(env["TSURU_APPNAME"].Value, check.Equals, a.Name)
-	c.Assert(env["TSURU_APPNAME"].Public, check.Equals, false)
-	err = auth.ReserveApp(s.admin)
-	_, ok := err.(*quota.QuotaExceededError)
-	c.Assert(ok, check.Equals, true)
-	_, err = repository.Manager().GetRepository(a.Name)
-	c.Assert(err, check.IsNil)
-}
-
-func (s *S) TestCannotCreateAppWithUnknownPlatform(c *check.C) {
-	a := App{Name: "paradisum", Platform: "unknown"}
-	err := CreateApp(&a, s.user)
-	_, ok := err.(InvalidPlatformError)
-	c.Assert(ok, check.Equals, true)
-}
-
-func (s *S) TestCannotCreateAppWithoutTeams(c *check.C) {
+func (s *S) TestCannotCreateAppWithoutTeamOwner(c *check.C) {
 	u := auth.User{Email: "perpetual@yes.com"}
 	err := u.Create()
 	c.Assert(err, check.IsNil)
 	defer s.conn.Users().Remove(bson.M{"email": u.Email})
 	a := App{Name: "beyond"}
 	err = CreateApp(&a, &u)
-	c.Check(err, check.NotNil)
-	_, ok := err.(NoTeamsError)
-	c.Check(ok, check.Equals, true)
+	c.Check(err, check.Equals, auth.ErrTeamNotFound)
 }
 
 func (s *S) TestCantCreateTwoAppsWithTheSameName(c *check.C) {
 	err := s.conn.Apps().Insert(bson.M{"name": "appname"})
 	c.Assert(err, check.IsNil)
 	defer s.conn.Apps().Remove(bson.M{"name": "appname"})
-	a := App{Name: "appname", Platform: "python"}
+	a := App{Name: "appname", Platform: "python", TeamOwner: s.team.Name}
 	err = CreateApp(&a, s.user)
 	defer Delete(&a, nil) // clean mess if test fail
 	c.Assert(err, check.NotNil)
@@ -416,8 +341,9 @@ func (s *S) TestCantCreateTwoAppsWithTheSameName(c *check.C) {
 
 func (s *S) TestCantCreateAppWithInvalidName(c *check.C) {
 	a := App{
-		Name:     "1123app",
-		Platform: "python",
+		Name:      "1123app",
+		Platform:  "python",
+		TeamOwner: s.team.Name,
 	}
 	err := CreateApp(&a, s.user)
 	c.Assert(err, check.NotNil)
@@ -432,8 +358,9 @@ func (s *S) TestCantCreateAppWithInvalidName(c *check.C) {
 func (s *S) TestCreateAppProvisionerFailures(c *check.C) {
 	s.provisioner.PrepareFailure("Provision", fmt.Errorf("exit status 1"))
 	a := App{
-		Name:     "theirapp",
-		Platform: "python",
+		Name:      "theirapp",
+		Platform:  "python",
+		TeamOwner: s.team.Name,
 	}
 	err := CreateApp(&a, s.user)
 	defer Delete(&a, nil) // clean mess if test fail
@@ -778,7 +705,9 @@ func (s *S) TestSetUnitStatusNotFound(c *check.C) {
 	a := App{Name: "appName", Platform: "django"}
 	err := a.SetUnitStatus("someunit", provision.StatusError)
 	c.Assert(err, check.NotNil)
-	c.Assert(err.Error(), check.Equals, "unit not found")
+	e, ok := err.(*provision.UnitNotFoundError)
+	c.Assert(ok, check.Equals, true)
+	c.Assert(e.ID, check.Equals, "someunit")
 }
 
 func (s *S) TestUpdateUnitsStatus(c *check.C) {
@@ -806,6 +735,10 @@ func (s *S) TestUpdateUnitsStatus(c *check.C) {
 }
 
 func (s *S) TestGrantAccess(c *check.C) {
+	user := customUserWithPermission(c, "myuser", permission.Permission{
+		Scheme:  permission.PermAppDeploy,
+		Context: permission.Context(permission.CtxTeam, s.team.Name),
+	})
 	app := App{Name: "appName", Platform: "django", Teams: []string{"acid-rain", "zito"}}
 	err := s.conn.Apps().Insert(app)
 	c.Assert(err, check.IsNil)
@@ -819,7 +752,7 @@ func (s *S) TestGrantAccess(c *check.C) {
 	c.Assert(app.Teams, check.DeepEquals, []string{"acid-rain", "zito", s.team.Name})
 	grants, err := repositorytest.Granted(app.Name)
 	c.Assert(err, check.IsNil)
-	c.Assert(grants, check.DeepEquals, []string{s.user.Email})
+	c.Assert(grants, check.DeepEquals, []string{user.Email})
 }
 
 func (s *S) TestGrantAccessFailsIfTheTeamAlreadyHasAccessToTheApp(c *check.C) {
@@ -829,6 +762,10 @@ func (s *S) TestGrantAccessFailsIfTheTeamAlreadyHasAccessToTheApp(c *check.C) {
 }
 
 func (s *S) TestRevokeAccess(c *check.C) {
+	user := customUserWithPermission(c, "myuser", permission.Permission{
+		Scheme:  permission.PermAppDeploy,
+		Context: permission.Context(permission.CtxTeam, s.team.Name),
+	})
 	team := auth.Team{Name: "abcd"}
 	err := s.conn.Teams().Insert(team)
 	c.Assert(err, check.IsNil)
@@ -838,7 +775,7 @@ func (s *S) TestRevokeAccess(c *check.C) {
 	defer s.conn.Apps().Remove(bson.M{"name": app.Name})
 	err = repository.Manager().CreateRepository(app.Name, nil)
 	c.Assert(err, check.IsNil)
-	err = repository.Manager().GrantAccess(app.Name, s.user.Email)
+	err = repository.Manager().GrantAccess(app.Name, user.Email)
 	c.Assert(err, check.IsNil)
 	err = app.Revoke(&s.team)
 	c.Assert(err, check.IsNil)
@@ -852,21 +789,21 @@ func (s *S) TestRevokeAccess(c *check.C) {
 }
 
 func (s *S) TestRevokeAccessKeepsUsersThatBelongToTwoTeams(c *check.C) {
-	user := auth.User{Email: "me@company.com"}
-	err := user.Create()
+	team := auth.Team{Name: "abcd"}
+	err := s.conn.Teams().Insert(team)
 	c.Assert(err, check.IsNil)
-	defer user.Delete()
-	team := auth.Team{Name: "abcd", Users: []string{s.user.Email, user.Email}}
-	err = s.conn.Teams().Insert(team)
-	c.Assert(err, check.IsNil)
-	defer s.conn.Teams().Remove(bson.M{"_id": team.Name})
+	user := customUserWithPermission(c, "myuser", permission.Permission{
+		Scheme:  permission.PermAppDeploy,
+		Context: permission.Context(permission.CtxTeam, s.team.Name),
+	}, permission.Permission{
+		Scheme:  permission.PermAppDeploy,
+		Context: permission.Context(permission.CtxTeam, team.Name),
+	})
 	app := App{Name: "appName", Platform: "django", Teams: []string{s.team.Name, team.Name}}
 	err = s.conn.Apps().Insert(app)
 	c.Assert(err, check.IsNil)
 	defer s.conn.Apps().Remove(bson.M{"name": app.Name})
 	err = repository.Manager().CreateRepository(app.Name, nil)
-	c.Assert(err, check.IsNil)
-	err = repository.Manager().GrantAccess(app.Name, s.user.Email)
 	c.Assert(err, check.IsNil)
 	err = repository.Manager().GrantAccess(app.Name, user.Email)
 	c.Assert(err, check.IsNil)
@@ -878,7 +815,7 @@ func (s *S) TestRevokeAccessKeepsUsersThatBelongToTwoTeams(c *check.C) {
 	c.Assert(found, check.Equals, false)
 	grants, err := repositorytest.Granted(app.Name)
 	c.Assert(err, check.IsNil)
-	c.Assert(grants, check.DeepEquals, []string{s.user.Email})
+	c.Assert(grants, check.DeepEquals, []string{user.Email})
 }
 
 func (s *S) TestRevokeAccessDoesntLeaveOrphanApps(c *check.C) {
@@ -985,7 +922,12 @@ func (s *S) TestSetEnvRespectsThePublicOnlyFlagKeepPrivateVariablesWhenServiceSe
 	err = s.provisioner.Provision(&a)
 	c.Assert(err, check.IsNil)
 	var buf bytes.Buffer
-	err = a.setEnvsToApp(envs, true, true, &buf)
+	err = a.setEnvsToApp(
+		bind.SetEnvApp{
+			Envs:          envs,
+			PublicOnly:    true,
+			ShouldRestart: true,
+		}, &buf)
 	c.Assert(err, check.IsNil)
 	newApp, err := GetByName(a.Name)
 	c.Assert(err, check.IsNil)
@@ -1036,7 +978,12 @@ func (s *S) TestSetEnvRespectsThePublicOnlyFlagOverwrittenAllVariablesWhenItsFal
 	}
 	err = s.provisioner.Provision(&a)
 	c.Assert(err, check.IsNil)
-	err = a.setEnvsToApp(envs, false, true, nil)
+	err = a.setEnvsToApp(
+		bind.SetEnvApp{
+			Envs:          envs,
+			PublicOnly:    false,
+			ShouldRestart: true,
+		}, nil)
 	c.Assert(err, check.IsNil)
 	newApp, err := GetByName(a.Name)
 	c.Assert(err, check.IsNil)
@@ -1054,6 +1001,60 @@ func (s *S) TestSetEnvRespectsThePublicOnlyFlagOverwrittenAllVariablesWhenItsFal
 	}
 	c.Assert(newApp.Env, check.DeepEquals, expected)
 	c.Assert(s.provisioner.Restarts(&a, ""), check.Equals, 1)
+}
+
+func (s *S) TestSetEnvWithNoRestartFlag(c *check.C) {
+	a := App{
+		Name: "myapp",
+		Env: map[string]bind.EnvVar{
+			"DATABASE_HOST": {
+				Name:   "DATABASE_HOST",
+				Value:  "localhost",
+				Public: false,
+			},
+		},
+	}
+	s.provisioner.PrepareOutput([]byte("exported"))
+	err := s.conn.Apps().Insert(a)
+	c.Assert(err, check.IsNil)
+	defer s.conn.Apps().Remove(bson.M{"name": a.Name})
+	envs := []bind.EnvVar{
+		{
+			Name:   "DATABASE_HOST",
+			Value:  "remotehost",
+			Public: true,
+		},
+		{
+			Name:   "DATABASE_PASSWORD",
+			Value:  "123",
+			Public: true,
+		},
+	}
+	err = s.provisioner.Provision(&a)
+	c.Assert(err, check.IsNil)
+	err = a.setEnvsToApp(
+		bind.SetEnvApp{
+			Envs:          envs,
+			PublicOnly:    false,
+			ShouldRestart: false,
+		}, nil)
+	c.Assert(err, check.IsNil)
+	newApp, err := GetByName(a.Name)
+	c.Assert(err, check.IsNil)
+	expected := map[string]bind.EnvVar{
+		"DATABASE_HOST": {
+			Name:   "DATABASE_HOST",
+			Value:  "remotehost",
+			Public: true,
+		},
+		"DATABASE_PASSWORD": {
+			Name:   "DATABASE_PASSWORD",
+			Value:  "123",
+			Public: true,
+		},
+	}
+	c.Assert(newApp.Env, check.DeepEquals, expected)
+	c.Assert(s.provisioner.Restarts(&a, ""), check.Equals, 0)
 }
 
 func (s *S) TestSetEnvsWhenAppHaveNoUnits(c *check.C) {
@@ -1085,7 +1086,12 @@ func (s *S) TestSetEnvsWhenAppHaveNoUnits(c *check.C) {
 	}
 	err = s.provisioner.Provision(&a)
 	c.Assert(err, check.IsNil)
-	err = a.setEnvsToApp(envs, false, false, nil)
+	err = a.setEnvsToApp(
+		bind.SetEnvApp{
+			Envs:          envs,
+			PublicOnly:    false,
+			ShouldRestart: false,
+		}, nil)
 	c.Assert(err, check.IsNil)
 	newApp, err := GetByName(a.Name)
 	c.Assert(err, check.IsNil)
@@ -1132,7 +1138,12 @@ func (s *S) TestUnsetEnvRespectsThePublicOnlyFlagKeepPrivateVariablesWhenItsTrue
 	c.Assert(err, check.IsNil)
 	err = a.AddUnits(1, "web", nil)
 	c.Assert(err, check.IsNil)
-	err = a.UnsetEnvs([]string{"DATABASE_HOST", "DATABASE_PASSWORD"}, true, nil)
+	err = a.UnsetEnvs(
+		bind.UnsetEnvApp{
+			VariableNames: []string{"DATABASE_HOST", "DATABASE_PASSWORD"},
+			PublicOnly:    true,
+			ShouldRestart: true,
+		}, nil)
 	c.Assert(err, check.IsNil)
 	newApp, err := GetByName(a.Name)
 	c.Assert(err, check.IsNil)
@@ -1174,7 +1185,12 @@ func (s *S) TestUnsetEnvRespectsThePublicOnlyFlagUnsettingAllVariablesWhenItsFal
 	c.Assert(err, check.IsNil)
 	err = a.AddUnits(1, "web", nil)
 	c.Assert(err, check.IsNil)
-	err = a.UnsetEnvs([]string{"DATABASE_HOST", "DATABASE_PASSWORD"}, false, nil)
+	err = a.UnsetEnvs(
+		bind.UnsetEnvApp{
+			VariableNames: []string{"DATABASE_HOST", "DATABASE_PASSWORD"},
+			PublicOnly:    false,
+			ShouldRestart: true,
+		}, nil)
 	c.Assert(err, check.IsNil)
 	newApp, err := GetByName(a.Name)
 	c.Assert(err, check.IsNil)
@@ -1182,6 +1198,45 @@ func (s *S) TestUnsetEnvRespectsThePublicOnlyFlagUnsettingAllVariablesWhenItsFal
 	c.Assert(s.provisioner.Restarts(&a, ""), check.Equals, 1)
 }
 
+func (s *S) TestUnsetEnvWithNoRestartFlag(c *check.C) {
+	a := App{
+		Name: "myapp",
+		Env: map[string]bind.EnvVar{
+			"DATABASE_HOST": {
+				Name:   "DATABASE_HOST",
+				Value:  "localhost",
+				Public: false,
+			},
+			"DATABASE_PASSWORD": {
+				Name:   "DATABASE_PASSWORD",
+				Value:  "123",
+				Public: true,
+			},
+		},
+		Quota: quota.Quota{
+			Limit: 10,
+		},
+	}
+	s.provisioner.PrepareOutput([]byte("exported"))
+	err := s.conn.Apps().Insert(a)
+	c.Assert(err, check.IsNil)
+	defer s.conn.Apps().Remove(bson.M{"name": a.Name})
+	err = s.provisioner.Provision(&a)
+	c.Assert(err, check.IsNil)
+	err = a.AddUnits(1, "web", nil)
+	c.Assert(err, check.IsNil)
+	err = a.UnsetEnvs(
+		bind.UnsetEnvApp{
+			VariableNames: []string{"DATABASE_HOST", "DATABASE_PASSWORD"},
+			PublicOnly:    false,
+			ShouldRestart: false,
+		}, nil)
+	c.Assert(err, check.IsNil)
+	newApp, err := GetByName(a.Name)
+	c.Assert(err, check.IsNil)
+	c.Assert(newApp.Env, check.DeepEquals, map[string]bind.EnvVar{})
+	c.Assert(s.provisioner.Restarts(&a, ""), check.Equals, 0)
+}
 func (s *S) TestUnsetEnvNoUnits(c *check.C) {
 	a := App{
 		Name: "myapp",
@@ -1204,7 +1259,12 @@ func (s *S) TestUnsetEnvNoUnits(c *check.C) {
 	defer s.conn.Apps().Remove(bson.M{"name": a.Name})
 	err = s.provisioner.Provision(&a)
 	c.Assert(err, check.IsNil)
-	err = a.UnsetEnvs([]string{"DATABASE_HOST", "DATABASE_PASSWORD"}, false, nil)
+	err = a.UnsetEnvs(
+		bind.UnsetEnvApp{
+			VariableNames: []string{"DATABASE_HOST", "DATABASE_PASSWORD"},
+			PublicOnly:    false,
+			ShouldRestart: true,
+		}, nil)
 	c.Assert(err, check.IsNil)
 	newApp, err := GetByName(a.Name)
 	c.Assert(err, check.IsNil)
@@ -1466,7 +1526,12 @@ func (s *S) TestAddInstanceFirst(c *check.C) {
 			"DATABASE_USER": "root",
 		},
 	}
-	err = a.AddInstance("myservice", instance, nil)
+	err = a.AddInstance(
+		bind.InstanceApp{
+			ServiceName:   "myservice",
+			Instance:      instance,
+			ShouldRestart: true,
+		}, nil)
 	c.Assert(err, check.IsNil)
 	a, err = GetByName(a.Name)
 	c.Assert(err, check.IsNil)
@@ -1518,7 +1583,12 @@ func (s *S) TestAddInstanceWithUnits(c *check.C) {
 			"DATABASE_HOST": "localhost",
 		},
 	}
-	err = a.AddInstance("myservice", instance, nil)
+	err = a.AddInstance(
+		bind.InstanceApp{
+			ServiceName:   "myservice",
+			Instance:      instance,
+			ShouldRestart: true,
+		}, nil)
 	c.Assert(err, check.IsNil)
 	a, err = GetByName(a.Name)
 	c.Assert(err, check.IsNil)
@@ -1543,6 +1613,51 @@ func (s *S) TestAddInstanceWithUnits(c *check.C) {
 	c.Assert(s.provisioner.Restarts(a, ""), check.Equals, 1)
 }
 
+func (s *S) TestAddInstanceWithUnitsNoRestart(c *check.C) {
+	a := &App{Name: "dark", Quota: quota.Quota{Limit: 10}}
+	err := s.conn.Apps().Insert(a)
+	c.Assert(err, check.IsNil)
+	defer s.conn.Apps().Remove(bson.M{"name": a.Name})
+	s.provisioner.Provision(a)
+	defer s.provisioner.Destroy(a)
+	err = a.AddUnits(1, "web", nil)
+	c.Assert(err, check.IsNil)
+	instance := bind.ServiceInstance{
+		Name: "myinstance",
+		Envs: map[string]string{
+			"DATABASE_HOST": "localhost",
+		},
+	}
+	err = a.AddInstance(
+		bind.InstanceApp{
+			ServiceName:   "myservice",
+			Instance:      instance,
+			ShouldRestart: false,
+		}, nil)
+	c.Assert(err, check.IsNil)
+	a, err = GetByName(a.Name)
+	c.Assert(err, check.IsNil)
+	expected := map[string][]bind.ServiceInstance{"myservice": {instance}}
+	env, ok := a.Env[TsuruServicesEnvVar]
+	c.Assert(ok, check.Equals, true)
+	c.Assert(env.Public, check.Equals, false)
+	c.Assert(env.Name, check.Equals, TsuruServicesEnvVar)
+	var got map[string][]bind.ServiceInstance
+	err = json.Unmarshal([]byte(env.Value), &got)
+	c.Assert(err, check.IsNil)
+	c.Assert(got, check.DeepEquals, expected)
+	delete(a.Env, TsuruServicesEnvVar)
+	c.Assert(a.Env, check.DeepEquals, map[string]bind.EnvVar{
+		"DATABASE_HOST": {
+			Name:         "DATABASE_HOST",
+			Value:        "localhost",
+			Public:       false,
+			InstanceName: "myinstance",
+		},
+	})
+	c.Assert(s.provisioner.Restarts(a, ""), check.Equals, 0)
+}
+
 func (s *S) TestAddInstanceMultipleServices(c *check.C) {
 	a := &App{
 		Name: "dark",
@@ -1563,13 +1678,23 @@ func (s *S) TestAddInstanceMultipleServices(c *check.C) {
 		Name: "myinstance",
 		Envs: map[string]string{"DATABASE_NAME": "myinstance"},
 	}
-	err = a.AddInstance("mysql", instance1, nil)
+	err = a.AddInstance(
+		bind.InstanceApp{
+			ServiceName:   "mysql",
+			Instance:      instance1,
+			ShouldRestart: true,
+		}, nil)
 	c.Assert(err, check.IsNil)
 	instance2 := bind.ServiceInstance{
 		Name: "yourinstance",
 		Envs: map[string]string{"DATABASE_NAME": "supermongo"},
 	}
-	err = a.AddInstance("mongodb", instance2, nil)
+	err = a.AddInstance(
+		bind.InstanceApp{
+			ServiceName:   "mongodb",
+			Instance:      instance2,
+			ShouldRestart: true,
+		}, nil)
 	c.Assert(err, check.IsNil)
 	expected := map[string][]bind.ServiceInstance{
 		"mysql":   {bind.ServiceInstance{Name: "mydb", Envs: map[string]string{"DATABASE_NAME": "mydb"}}, instance1},
@@ -1602,15 +1727,30 @@ func (s *S) TestAddInstanceAndRemoveInstanceMultipleServices(c *check.C) {
 		Name: "myinstance",
 		Envs: map[string]string{"DATABASE_NAME": "myinstance"},
 	}
-	err = a.AddInstance("mysql", instance1, nil)
+	err = a.AddInstance(
+		bind.InstanceApp{
+			ServiceName:   "mysql",
+			Instance:      instance1,
+			ShouldRestart: true,
+		}, nil)
 	c.Assert(err, check.IsNil)
 	instance2 := bind.ServiceInstance{
 		Name: "yourinstance",
 		Envs: map[string]string{"DATABASE_NAME": "supermongo"},
 	}
-	err = a.AddInstance("mongodb", instance2, nil)
+	err = a.AddInstance(
+		bind.InstanceApp{
+			ServiceName:   "mongodb",
+			Instance:      instance2,
+			ShouldRestart: true,
+		}, nil)
 	c.Assert(err, check.IsNil)
-	err = a.RemoveInstance("mysql", instance1, nil)
+	err = a.RemoveInstance(
+		bind.InstanceApp{
+			ServiceName:   "mysql",
+			Instance:      instance1,
+			ShouldRestart: true,
+		}, nil)
 	c.Assert(err, check.IsNil)
 	expected := map[string][]bind.ServiceInstance{
 		"mysql":   {},
@@ -1653,7 +1793,12 @@ func (s *S) TestRemoveInstance(c *check.C) {
 	s.provisioner.Provision(a)
 	defer s.provisioner.Destroy(a)
 	instance := bind.ServiceInstance{Name: "mydb", Envs: map[string]string{"DATABASE_NAME": "mydb"}}
-	err = a.RemoveInstance("mysql", instance, nil)
+	err = a.RemoveInstance(
+		bind.InstanceApp{
+			ServiceName:   "mysql",
+			Instance:      instance,
+			ShouldRestart: true,
+		}, nil)
 	c.Assert(err, check.IsNil)
 	a, err = GetByName(a.Name)
 	c.Assert(err, check.IsNil)
@@ -1690,7 +1835,12 @@ func (s *S) TestRemoveInstanceShifts(c *check.C) {
 	s.provisioner.Provision(a)
 	defer s.provisioner.Destroy(a)
 	instance := bind.ServiceInstance{Name: "hisdb"}
-	err = a.RemoveInstance("mysql", instance, nil)
+	err = a.RemoveInstance(
+		bind.InstanceApp{
+			ServiceName:   "mysql",
+			Instance:      instance,
+			ShouldRestart: true,
+		}, nil)
 	c.Assert(err, check.IsNil)
 	expected := map[string][]bind.ServiceInstance{
 		"mysql": {
@@ -1729,7 +1879,12 @@ func (s *S) TestRemoveInstanceNotFound(c *check.C) {
 	s.provisioner.Provision(a)
 	defer s.provisioner.Destroy(a)
 	instance := bind.ServiceInstance{Name: "yourdb"}
-	err = a.RemoveInstance("mysql", instance, nil)
+	err = a.RemoveInstance(
+		bind.InstanceApp{
+			ServiceName:   "mysql",
+			Instance:      instance,
+			ShouldRestart: true,
+		}, nil)
 	c.Assert(err, check.IsNil)
 	a, err = GetByName(a.Name)
 	c.Assert(err, check.IsNil)
@@ -1761,7 +1916,12 @@ func (s *S) TestRemoveInstanceServiceNotFound(c *check.C) {
 	s.provisioner.Provision(a)
 	defer s.provisioner.Destroy(a)
 	instance := bind.ServiceInstance{Name: "mydb"}
-	err = a.RemoveInstance("mongodb", instance, nil)
+	err = a.RemoveInstance(
+		bind.InstanceApp{
+			ServiceName:   "mongodb",
+			Instance:      instance,
+			ShouldRestart: true,
+		}, nil)
 	c.Assert(err, check.IsNil)
 	a, err = GetByName(a.Name)
 	c.Assert(err, check.IsNil)
@@ -1802,7 +1962,12 @@ func (s *S) TestRemoveInstanceWithUnits(c *check.C) {
 	err = a.AddUnits(1, "web", nil)
 	c.Assert(err, check.IsNil)
 	instance := bind.ServiceInstance{Name: "mydb", Envs: map[string]string{"DATABASE_NAME": "mydb"}}
-	err = a.RemoveInstance("mysql", instance, nil)
+	err = a.RemoveInstance(
+		bind.InstanceApp{
+			ServiceName:   "mysql",
+			Instance:      instance,
+			ShouldRestart: true,
+		}, nil)
 	c.Assert(err, check.IsNil)
 	a, err = GetByName(a.Name)
 	c.Assert(err, check.IsNil)
@@ -1814,6 +1979,51 @@ func (s *S) TestRemoveInstanceWithUnits(c *check.C) {
 	delete(a.Env, TsuruServicesEnvVar)
 	c.Assert(a.Env, check.DeepEquals, map[string]bind.EnvVar{})
 	c.Assert(s.provisioner.Restarts(a, ""), check.Equals, 1)
+}
+
+func (s *S) TestRemoveInstanceWithUnitsNoRestart(c *check.C) {
+	a := &App{
+		Name: "dark",
+		Env: map[string]bind.EnvVar{
+			TsuruServicesEnvVar: {
+				Name:   TsuruServicesEnvVar,
+				Public: false,
+				Value:  `{"mysql": [{"instance_name": "mydb", "envs": {"DATABASE_NAME": "mydb"}}]}`,
+			},
+			"DATABASE_NAME": {
+				Name:         "DATABASE_NAME",
+				Public:       false,
+				Value:        "mydb",
+				InstanceName: "mydb",
+			},
+		},
+		Quota: quota.Quota{Limit: 10},
+	}
+	err := s.conn.Apps().Insert(a)
+	c.Assert(err, check.IsNil)
+	defer s.conn.Apps().Remove(bson.M{"name": a.Name})
+	s.provisioner.Provision(a)
+	defer s.provisioner.Destroy(a)
+	err = a.AddUnits(1, "web", nil)
+	c.Assert(err, check.IsNil)
+	instance := bind.ServiceInstance{Name: "mydb", Envs: map[string]string{"DATABASE_NAME": "mydb"}}
+	err = a.RemoveInstance(
+		bind.InstanceApp{
+			ServiceName:   "mysql",
+			Instance:      instance,
+			ShouldRestart: false,
+		}, nil)
+	c.Assert(err, check.IsNil)
+	a, err = GetByName(a.Name)
+	c.Assert(err, check.IsNil)
+	env, ok := a.Env[TsuruServicesEnvVar]
+	c.Assert(ok, check.Equals, true)
+	c.Assert(env.Value, check.Equals, `{"mysql":[]}`)
+	c.Assert(env.Public, check.Equals, false)
+	c.Assert(env.Name, check.Equals, TsuruServicesEnvVar)
+	delete(a.Env, TsuruServicesEnvVar)
+	c.Assert(a.Env, check.DeepEquals, map[string]bind.EnvVar{})
+	c.Assert(s.provisioner.Restarts(a, ""), check.Equals, 0)
 }
 
 func (s *S) TestIsValid(c *check.C) {
@@ -1947,7 +2157,7 @@ func (s *S) TestLogWithListeners(c *check.C) {
 	c.Assert(err, check.IsNil)
 	defer l.Close()
 	go func() {
-		for log := range l.C {
+		for log := range l.c {
 			logs.Lock()
 			logs.l = append(logs.l, log)
 			logs.Unlock()
@@ -2050,6 +2260,29 @@ func (s *S) TestLastLogsEmpty(c *check.C) {
 	c.Assert(logs, check.DeepEquals, []Applog{})
 }
 
+type logDisabledFakeProvisioner struct {
+	provisiontest.FakeProvisioner
+}
+
+func (p *logDisabledFakeProvisioner) LogsEnabled(app provision.App) (bool, string, error) {
+	return false, "my doc msg", nil
+}
+
+func (s *S) TestLastLogsDisabled(c *check.C) {
+	oldProvisioner := Provisioner
+	defer func() { Provisioner = oldProvisioner }()
+	Provisioner = &logDisabledFakeProvisioner{}
+	app := App{
+		Name:     "app3",
+		Platform: "vougan",
+		Teams:    []string{s.team.Name},
+	}
+	err := s.conn.Apps().Insert(app)
+	c.Assert(err, check.IsNil)
+	_, err = app.LastLogs(10, Applog{})
+	c.Assert(err, check.ErrorMatches, "my doc msg")
+}
+
 func (s *S) TestGetTeams(c *check.C) {
 	app := App{Name: "app", Teams: []string{s.team.Name}}
 	teams := app.GetTeams()
@@ -2073,30 +2306,32 @@ func (s *S) TestGetUnits(c *check.C) {
 func (s *S) TestAppMarshalJSON(c *check.C) {
 	repository.Manager().CreateRepository("name", nil)
 	app := App{
-		Name:      "name",
-		Platform:  "Framework",
-		Teams:     []string{"team1"},
-		Ip:        "10.10.10.1",
-		CName:     []string{"name.mycompany.com"},
-		Owner:     "appOwner",
-		Deploys:   7,
-		Pool:      "test",
-		Plan:      Plan{Name: "myplan", Memory: 64, Swap: 128, CpuShare: 100},
-		TeamOwner: "myteam",
+		Name:        "name",
+		Platform:    "Framework",
+		Teams:       []string{"team1"},
+		Ip:          "10.10.10.1",
+		CName:       []string{"name.mycompany.com"},
+		Owner:       "appOwner",
+		Deploys:     7,
+		Pool:        "test",
+		Description: "description",
+		Plan:        Plan{Name: "myplan", Memory: 64, Swap: 128, CpuShare: 100},
+		TeamOwner:   "myteam",
 	}
 	expected := map[string]interface{}{
-		"name":       "name",
-		"platform":   "Framework",
-		"repository": "git@" + repositorytest.ServerHost + ":name.git",
-		"teams":      []interface{}{"team1"},
-		"units":      nil,
-		"ip":         "10.10.10.1",
-		"cname":      []interface{}{"name.mycompany.com"},
-		"owner":      "appOwner",
-		"deploys":    float64(7),
-		"pool":       "test",
-		"teamowner":  "myteam",
-		"lock":       s.zeroLock,
+		"name":        "name",
+		"platform":    "Framework",
+		"repository":  "git@" + repositorytest.ServerHost + ":name.git",
+		"teams":       []interface{}{"team1"},
+		"units":       nil,
+		"ip":          "10.10.10.1",
+		"cname":       []interface{}{"name.mycompany.com"},
+		"owner":       "appOwner",
+		"deploys":     float64(7),
+		"pool":        "test",
+		"description": "description",
+		"teamowner":   "myteam",
+		"lock":        s.zeroLock,
 		"plan": map[string]interface{}{
 			"name":     "myplan",
 			"memory":   float64(64),
@@ -2114,30 +2349,32 @@ func (s *S) TestAppMarshalJSON(c *check.C) {
 
 func (s *S) TestAppMarshalJSONWithoutRepository(c *check.C) {
 	app := App{
-		Name:      "name",
-		Platform:  "Framework",
-		Teams:     []string{"team1"},
-		Ip:        "10.10.10.1",
-		CName:     []string{"name.mycompany.com"},
-		Owner:     "appOwner",
-		Deploys:   7,
-		Pool:      "pool1",
-		Plan:      Plan{Name: "myplan", Memory: 64, Swap: 128, CpuShare: 100},
-		TeamOwner: "myteam",
+		Name:        "name",
+		Platform:    "Framework",
+		Teams:       []string{"team1"},
+		Ip:          "10.10.10.1",
+		CName:       []string{"name.mycompany.com"},
+		Owner:       "appOwner",
+		Deploys:     7,
+		Pool:        "pool1",
+		Description: "description",
+		Plan:        Plan{Name: "myplan", Memory: 64, Swap: 128, CpuShare: 100},
+		TeamOwner:   "myteam",
 	}
 	expected := map[string]interface{}{
-		"name":       "name",
-		"platform":   "Framework",
-		"repository": "",
-		"teams":      []interface{}{"team1"},
-		"units":      nil,
-		"ip":         "10.10.10.1",
-		"cname":      []interface{}{"name.mycompany.com"},
-		"owner":      "appOwner",
-		"deploys":    float64(7),
-		"pool":       "pool1",
-		"teamowner":  "myteam",
-		"lock":       s.zeroLock,
+		"name":        "name",
+		"platform":    "Framework",
+		"repository":  "",
+		"teams":       []interface{}{"team1"},
+		"units":       nil,
+		"ip":          "10.10.10.1",
+		"cname":       []interface{}{"name.mycompany.com"},
+		"owner":       "appOwner",
+		"deploys":     float64(7),
+		"pool":        "pool1",
+		"description": "description",
+		"teamowner":   "myteam",
+		"lock":        s.zeroLock,
 		"plan": map[string]interface{}{
 			"name":     "myplan",
 			"memory":   float64(64),
@@ -2256,7 +2493,7 @@ func (s *S) TestListReturnsAppsForAGivenUser(c *check.C) {
 		s.conn.Apps().Remove(bson.M{"name": a.Name})
 		s.conn.Apps().Remove(bson.M{"name": a2.Name})
 	}()
-	apps, err := List(s.user, nil)
+	apps, err := List(nil)
 	c.Assert(err, check.IsNil)
 	c.Assert(len(apps), check.Equals, 2)
 }
@@ -2285,7 +2522,7 @@ func (s *S) TestListReturnsAppsForAGivenUserFilteringByName(c *check.C) {
 		s.conn.Apps().Remove(bson.M{"name": a2.Name})
 		s.conn.Apps().Remove(bson.M{"name": a3.Name})
 	}()
-	apps, err := List(s.user, &Filter{Name: "app\\d{1}"})
+	apps, err := List(&Filter{Name: "app\\d{1}"})
 	c.Assert(err, check.IsNil)
 	c.Assert(len(apps), check.Equals, 2)
 }
@@ -2309,7 +2546,7 @@ func (s *S) TestListReturnsAppsForAGivenUserFilteringByPlatform(c *check.C) {
 		s.conn.Apps().Remove(bson.M{"name": a.Name})
 		s.conn.Apps().Remove(bson.M{"name": a2.Name})
 	}()
-	apps, err := List(s.user, &Filter{Platform: "ruby"})
+	apps, err := List(&Filter{Platform: "ruby"})
 	c.Assert(err, check.IsNil)
 	c.Assert(len(apps), check.Equals, 1)
 }
@@ -2333,7 +2570,7 @@ func (s *S) TestListReturnsAppsForAGivenUserFilteringByTeamOwner(c *check.C) {
 		s.conn.Apps().Remove(bson.M{"name": a.Name})
 		s.conn.Apps().Remove(bson.M{"name": a2.Name})
 	}()
-	apps, err := List(s.user, &Filter{TeamOwner: "foo"})
+	apps, err := List(&Filter{TeamOwner: "foo"})
 	c.Assert(err, check.IsNil)
 	c.Assert(len(apps), check.Equals, 1)
 }
@@ -2357,7 +2594,7 @@ func (s *S) TestListReturnsAppsForAGivenUserFilteringByOwner(c *check.C) {
 		s.conn.Apps().Remove(bson.M{"name": a.Name})
 		s.conn.Apps().Remove(bson.M{"name": a2.Name})
 	}()
-	apps, err := List(s.user, &Filter{UserOwner: "foo"})
+	apps, err := List(&Filter{UserOwner: "foo"})
 	c.Assert(err, check.IsNil)
 	c.Assert(len(apps), check.Equals, 1)
 }
@@ -2387,7 +2624,7 @@ func (s *S) TestListReturnsAppsForAGivenUserFilteringByLockState(c *check.C) {
 		s.conn.Apps().Remove(bson.M{"name": a.Name})
 		s.conn.Apps().Remove(bson.M{"name": a2.Name})
 	}()
-	apps, err := List(s.user, &Filter{Locked: true})
+	apps, err := List(&Filter{Locked: true})
 	c.Assert(err, check.IsNil)
 	c.Assert(len(apps), check.Equals, 1)
 	c.Assert(apps[0].Name, check.Equals, "othertestapp")
@@ -2410,7 +2647,7 @@ func (s *S) TestListAll(c *check.C) {
 		s.conn.Apps().Remove(bson.M{"name": a.Name})
 		s.conn.Apps().Remove(bson.M{"name": a2.Name})
 	}()
-	apps, err := List(nil, nil)
+	apps, err := List(nil)
 	c.Assert(err, check.IsNil)
 	c.Assert(len(apps), check.Equals, 2)
 }
@@ -2439,7 +2676,7 @@ func (s *S) TestListFilteringByName(c *check.C) {
 		s.conn.Apps().Remove(bson.M{"name": a2.Name})
 		s.conn.Apps().Remove(bson.M{"name": a3.Name})
 	}()
-	apps, err := List(nil, &Filter{Name: "app\\d{1}"})
+	apps, err := List(&Filter{Name: "app\\d{1}"})
 	c.Assert(err, check.IsNil)
 	c.Assert(len(apps), check.Equals, 2)
 }
@@ -2463,7 +2700,7 @@ func (s *S) TestListFilteringByPlatform(c *check.C) {
 		s.conn.Apps().Remove(bson.M{"name": a.Name})
 		s.conn.Apps().Remove(bson.M{"name": a2.Name})
 	}()
-	apps, err := List(nil, &Filter{Platform: "ruby"})
+	apps, err := List(&Filter{Platform: "ruby"})
 	c.Assert(err, check.IsNil)
 	c.Assert(len(apps), check.Equals, 1)
 }
@@ -2487,7 +2724,7 @@ func (s *S) TestListFilteringByOwner(c *check.C) {
 		s.conn.Apps().Remove(bson.M{"name": a.Name})
 		s.conn.Apps().Remove(bson.M{"name": a2.Name})
 	}()
-	apps, err := List(nil, &Filter{UserOwner: "foo"})
+	apps, err := List(&Filter{UserOwner: "foo"})
 	c.Assert(err, check.IsNil)
 	c.Assert(len(apps), check.Equals, 1)
 }
@@ -2511,28 +2748,103 @@ func (s *S) TestListFilteringByTeamOwner(c *check.C) {
 		s.conn.Apps().Remove(bson.M{"name": a.Name})
 		s.conn.Apps().Remove(bson.M{"name": a2.Name})
 	}()
-	apps, err := List(nil, &Filter{TeamOwner: "foo"})
+	apps, err := List(&Filter{TeamOwner: "foo"})
 	c.Assert(err, check.IsNil)
 	c.Assert(len(apps), check.Equals, 1)
 }
 
+func (s *S) TestListFilteringByPool(c *check.C) {
+	opts := provision.AddPoolOptions{Name: "test2", Default: false}
+	err := provision.AddPool(opts)
+	c.Assert(err, check.IsNil)
+	a := App{
+		Name:  "testapp",
+		Teams: []string{s.team.Name},
+		Owner: "foo",
+		Pool:  opts.Name,
+	}
+	a2 := App{
+		Name:  "othertestapp",
+		Teams: []string{s.team.Name},
+		Owner: "bar",
+		Pool:  s.Pool,
+	}
+	err = s.conn.Apps().Insert(&a)
+	c.Assert(err, check.IsNil)
+	err = s.conn.Apps().Insert(&a2)
+	c.Assert(err, check.IsNil)
+	defer func() {
+		s.conn.Apps().Remove(bson.M{"name": a.Name})
+		s.conn.Apps().Remove(bson.M{"name": a2.Name})
+	}()
+	apps, err := List(&Filter{Pool: s.Pool})
+	c.Assert(err, check.IsNil)
+	c.Assert(len(apps), check.Equals, 1)
+	c.Assert(apps[0].Name, check.Equals, a2.Name)
+	c.Assert(apps[0].Pool, check.Equals, a2.Pool)
+}
+
 func (s *S) TestListReturnsEmptyAppArrayWhenUserHasNoAccessToAnyApp(c *check.C) {
-	apps, err := List(s.user, nil)
+	apps, err := List(nil)
 	c.Assert(err, check.IsNil)
 	c.Assert(apps, check.DeepEquals, []App(nil))
 }
 
-func (s *S) TestListReturnsAllAppsWhenUserIsInAdminTeam(c *check.C) {
+func (s *S) TestListReturnsAllAppsWhenUsedWithNoFilters(c *check.C) {
 	a := App{Name: "testApp", Teams: []string{"notAdmin", "noSuperUser"}}
 	err := s.conn.Apps().Insert(&a)
 	c.Assert(err, check.IsNil)
 	defer s.conn.Apps().Remove(bson.M{"name": a.Name})
-	s.createAdminUserAndTeam(c)
-	defer s.removeAdminUserAndTeam(c)
-	apps, err := List(s.admin, nil)
+	apps, err := List(nil)
 	c.Assert(len(apps), Greater, 0)
 	c.Assert(apps[0].Name, check.Equals, "testApp")
 	c.Assert(apps[0].Teams, check.DeepEquals, []string{"notAdmin", "noSuperUser"})
+}
+
+func (s *S) TestListFilteringExtraWithOr(c *check.C) {
+	opts := provision.AddPoolOptions{Name: "test2", Default: false}
+	err := provision.AddPool(opts)
+	c.Assert(err, check.IsNil)
+	a := App{
+		Name:  "testapp1",
+		Teams: []string{s.team.Name},
+		Owner: "foo",
+		Pool:  opts.Name,
+	}
+	a2 := App{
+		Name:  "testapp2",
+		Teams: []string{s.team.Name},
+		Owner: "bar",
+		Pool:  s.Pool,
+	}
+	a3 := App{
+		Name:  "testapp3",
+		Teams: []string{"otherteam"},
+		Owner: "bar",
+		Pool:  opts.Name,
+	}
+	err = s.conn.Apps().Insert(&a)
+	c.Assert(err, check.IsNil)
+	err = s.conn.Apps().Insert(&a2)
+	c.Assert(err, check.IsNil)
+	err = s.conn.Apps().Insert(&a3)
+	c.Assert(err, check.IsNil)
+	defer func() {
+		s.conn.Apps().Remove(bson.M{"name": a.Name})
+		s.conn.Apps().Remove(bson.M{"name": a2.Name})
+		s.conn.Apps().Remove(bson.M{"name": a3.Name})
+	}()
+	f := &Filter{}
+	f.ExtraIn("pool", s.Pool)
+	f.ExtraIn("teams", "otherteam")
+	apps, err := List(f)
+	c.Assert(err, check.IsNil)
+	var appNames []string
+	for _, a := range apps {
+		appNames = append(appNames, a.Name)
+	}
+	sort.Strings(appNames)
+	c.Assert(appNames, check.DeepEquals, []string{a2.Name, a3.Name})
 }
 
 func (s *S) TestGetName(c *check.C) {
@@ -2570,9 +2882,15 @@ func (s *S) TestSetQuotaInUseNotFound(c *check.C) {
 
 func (s *S) TestSetQuotaInUseUnlimited(c *check.C) {
 	app := App{Name: "someapp", Quota: quota.Unlimited}
-	err := app.SetQuotaInUse(1)
-	c.Assert(err, check.NotNil)
-	c.Assert(err.Error(), check.Equals, "cannot set quota usage for unlimited quota")
+	err := s.conn.Apps().Insert(app)
+	c.Assert(err, check.IsNil)
+	defer s.conn.Apps().Remove(bson.M{"name": app.Name})
+	err = app.SetQuotaInUse(3)
+	c.Assert(err, check.IsNil)
+	a, err := GetByName(app.Name)
+	c.Assert(err, check.IsNil)
+	c.Assert(a.Quota, check.DeepEquals, quota.Quota{Limit: -1, InUse: 3})
+
 }
 
 func (s *S) TestSetQuotaInUseInvalid(c *check.C) {
@@ -2830,58 +3148,30 @@ func (s *S) TestAppRegisterUnitInvalidUnit(c *check.C) {
 	s.provisioner.Provision(&a)
 	defer s.provisioner.Destroy(&a)
 	err := a.RegisterUnit("oddity", nil)
-	c.Assert(err, check.Equals, provision.ErrUnitNotFound)
+	c.Assert(err, check.NotNil)
+	e, ok := err.(*provision.UnitNotFoundError)
+	c.Assert(ok, check.Equals, true)
+	c.Assert(e.ID, check.Equals, "oddity")
 }
 
 func (s *S) TestAppValidateTeamOwner(c *check.C) {
-	team := auth.Team{Name: "test", Users: []string{s.user.Email}}
+	team := auth.Team{Name: "test"}
 	err := s.conn.Teams().Insert(team)
 	defer s.conn.Teams().Remove(bson.M{"_id": team.Name})
 	c.Assert(err, check.IsNil)
 	a := App{Name: "test", Platform: "python", TeamOwner: team.Name}
 	s.provisioner.Provision(&a)
 	defer s.provisioner.Destroy(&a)
-	err = a.ValidateTeamOwner(s.user)
+	err = a.validateTeamOwner()
 	c.Assert(err, check.IsNil)
 }
 
-func (s *S) TestAppValidateTeamOwnerSetAnTeamWhichNotExistsAndUserIsAdmin(c *check.C) {
+func (s *S) TestAppValidateTeamOwnerSetAnTeamWhichNotExists(c *check.C) {
 	a := App{Name: "test", Platform: "python", TeamOwner: "not-exists"}
 	s.provisioner.Provision(&a)
 	defer s.provisioner.Destroy(&a)
-	err := a.ValidateTeamOwner(s.admin)
-	c.Assert(err, check.NotNil)
+	err := a.validateTeamOwner()
 	c.Assert(err, check.Equals, auth.ErrTeamNotFound)
-}
-
-func (s *S) TestAppValidateTeamOwnerToUserWhoIsNotThatTeam(c *check.C) {
-	team := auth.Team{Name: "test"}
-	err := s.conn.Teams().Insert(team)
-	defer s.conn.Teams().Remove(bson.M{"_id": team.Name})
-	c.Assert(err, check.IsNil)
-	a := App{Name: "test", Platform: "python", TeamOwner: team.Name}
-	s.provisioner.Provision(&a)
-	defer s.provisioner.Destroy(&a)
-	err = a.ValidateTeamOwner(s.user)
-	c.Assert(err, check.NotNil)
-	c.Assert(err.Error(), check.Equals, "You can not set test team as app's owner. Please set one of your teams as app's owner.")
-}
-
-func (s *S) TestAppValidateTeamOwnerAdminCanSetAppToAnyTeam(c *check.C) {
-	admin := &auth.User{Email: "admin@a.com"}
-	teamAdmin := auth.Team{Name: "admin", Users: []string{admin.Email}}
-	err := s.conn.Teams().Insert(teamAdmin)
-	defer s.conn.Teams().Remove(bson.M{"_id": teamAdmin.Name})
-	c.Assert(err, check.IsNil)
-	team := auth.Team{Name: "test"}
-	err = s.conn.Teams().Insert(team)
-	defer s.conn.Teams().Remove(bson.M{"_id": team.Name})
-	c.Assert(err, check.IsNil)
-	a := App{Name: "test", Platform: "python", TeamOwner: team.Name}
-	s.provisioner.Provision(&a)
-	defer s.provisioner.Destroy(&a)
-	err = a.ValidateTeamOwner(admin)
-	c.Assert(err, check.IsNil)
 }
 
 func (s *S) TestAppSetPoolByTeamOwner(c *check.C) {
@@ -3434,4 +3724,17 @@ func (s *S) TestRebuildRoutesRecreatesCnames(c *check.C) {
 	c.Assert(routes, check.HasLen, 1)
 	c.Assert(routertest.FakeRouter.HasRoute(a.Name, units[0].Address.String()), check.Equals, true)
 	c.Assert(routertest.FakeRouter.HasCName("my.cname.com"), check.Equals, true)
+}
+
+func (s *S) TestUpdateDescription(c *check.C) {
+	app := App{Name: "example", Platform: "python", TeamOwner: s.team.Name, Description: "blabla"}
+	err := CreateApp(&app, s.user)
+	defer Delete(&app, nil)
+	c.Assert(err, check.IsNil)
+	a := App{Name: "example", Description: "bleble"}
+	err = a.Update()
+	c.Assert(err, check.IsNil)
+	dbApp, err := GetByName(app.Name)
+	c.Assert(err, check.IsNil)
+	c.Assert(dbApp.Description, check.Equals, "bleble")
 }

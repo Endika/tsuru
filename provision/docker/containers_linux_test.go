@@ -11,6 +11,7 @@ import (
 	"github.com/tsuru/docker-cluster/cluster"
 	"github.com/tsuru/tsuru/action"
 	"github.com/tsuru/tsuru/app"
+	"github.com/tsuru/tsuru/net"
 	"github.com/tsuru/tsuru/provision"
 	"github.com/tsuru/tsuru/provision/provisiontest"
 	"github.com/tsuru/tsuru/safe"
@@ -26,7 +27,7 @@ func (s *S) TestRebalanceContainersManyAppsSegStress(c *check.C) {
 		c.Assert(err, check.IsNil)
 		defer otherServer.Stop()
 		nodes = append(nodes, cluster.Node{Address: otherServer.URL(), Metadata: map[string]string{"pool": "pool1"}})
-		nodeHosts = append(nodeHosts, urlToHost(otherServer.URL()))
+		nodeHosts = append(nodeHosts, net.URLToHost(otherServer.URL()))
 	}
 	var err error
 	p := &dockerProvisioner{}
@@ -46,7 +47,7 @@ func (s *S) TestRebalanceContainersManyAppsSegStress(c *check.C) {
 	maxContainers := 40
 	for i := 0; i < maxContainers; i++ {
 		appName := fmt.Sprintf("myapp-%d", i)
-		err := s.newFakeImage(p, "tsuru/app-"+appName, nil)
+		err = s.newFakeImage(p, "tsuru/app-"+appName, nil)
 		c.Assert(err, check.IsNil)
 		appInstance := provisiontest.NewFakeApp(appName, "python", 0)
 		defer p.Destroy(appInstance)

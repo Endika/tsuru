@@ -1,4 +1,4 @@
-// Copyright 2015 tsuru authors. All rights reserved.
+// Copyright 2016 tsuru authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -23,7 +23,7 @@ func (s *S) TestPlanAdd(c *check.C) {
 	body := strings.NewReader(`{"name": "xyz", "memory": 9223372036854775807, "swap": 1024, "cpushare": 100, "router": "fake" }`)
 	request, err := http.NewRequest("POST", "/plans", body)
 	c.Assert(err, check.IsNil)
-	request.Header.Set("Authorization", "bearer "+s.admintoken.GetValue())
+	request.Header.Set("Authorization", "bearer "+s.token.GetValue())
 	m := RunServer(true)
 	m.ServeHTTP(recorder, request)
 	c.Assert(recorder.Code, check.Equals, http.StatusCreated)
@@ -36,12 +36,13 @@ func (s *S) TestPlanAdd(c *check.C) {
 	})
 }
 
-func (s *S) TestPlanAddWithNonAdmin(c *check.C) {
+func (s *S) TestPlanAddWithNoPermission(c *check.C) {
+	token := userWithPermission(c)
 	recorder := httptest.NewRecorder()
 	body := strings.NewReader(`{"name": "xyz", "memory": 1, "swap": 2, "cpushare": 3 }`)
 	request, err := http.NewRequest("POST", "/plans", body)
 	c.Assert(err, check.IsNil)
-	request.Header.Set("Authorization", "bearer "+s.token.GetValue())
+	request.Header.Set("Authorization", "bearer "+token.GetValue())
 	m := RunServer(true)
 	m.ServeHTTP(recorder, request)
 	c.Assert(recorder.Code, check.Equals, http.StatusForbidden)
@@ -52,25 +53,39 @@ func (s *S) TestPlanAddInvalidJson(c *check.C) {
 	body := strings.NewReader(`{"name": "", "memory": 9223372036854775807, "swap": 1024, "cpushare": 100}`)
 	request, err := http.NewRequest("POST", "/plans", body)
 	c.Assert(err, check.IsNil)
-	request.Header.Set("Authorization", "bearer "+s.admintoken.GetValue())
+	request.Header.Set("Authorization", "bearer "+s.token.GetValue())
 	m := RunServer(true)
 	m.ServeHTTP(recorder, request)
 	c.Assert(recorder.Code, check.Equals, http.StatusBadRequest)
-
 	recorder = httptest.NewRecorder()
 	body = strings.NewReader(`{"name": "xxx", "memory": 1234, "swap": 9999, "cpushare": 0}`)
 	request, err = http.NewRequest("POST", "/plans", body)
 	c.Assert(err, check.IsNil)
-	request.Header.Set("Authorization", "bearer "+s.admintoken.GetValue())
+	request.Header.Set("Authorization", "bearer "+s.token.GetValue())
 	m = RunServer(true)
 	m.ServeHTTP(recorder, request)
 	c.Assert(recorder.Code, check.Equals, http.StatusBadRequest)
-
 	recorder = httptest.NewRecorder()
 	body = strings.NewReader(`{"name": "xxx", ".........`)
 	request, err = http.NewRequest("POST", "/plans", body)
 	c.Assert(err, check.IsNil)
-	request.Header.Set("Authorization", "bearer "+s.admintoken.GetValue())
+	request.Header.Set("Authorization", "bearer "+s.token.GetValue())
+	m = RunServer(true)
+	m.ServeHTTP(recorder, request)
+	c.Assert(recorder.Code, check.Equals, http.StatusBadRequest)
+	recorder = httptest.NewRecorder()
+	body = strings.NewReader(`{"name": "plan1", "memory": 9223372036854775807, "swap": 1024, "cpushare": 1}`)
+	request, err = http.NewRequest("POST", "/plans", body)
+	c.Assert(err, check.IsNil)
+	request.Header.Set("Authorization", "bearer "+s.token.GetValue())
+	m = RunServer(true)
+	m.ServeHTTP(recorder, request)
+	c.Assert(recorder.Code, check.Equals, http.StatusBadRequest)
+	recorder = httptest.NewRecorder()
+	body = strings.NewReader(`{"name": "plan1", "memory": 4, "swap": 1024, "cpushare": 100}`)
+	request, err = http.NewRequest("POST", "/plans", body)
+	c.Assert(err, check.IsNil)
+	request.Header.Set("Authorization", "bearer "+s.token.GetValue())
 	m = RunServer(true)
 	m.ServeHTTP(recorder, request)
 	c.Assert(recorder.Code, check.Equals, http.StatusBadRequest)
@@ -81,7 +96,7 @@ func (s *S) TestPlanAddDupp(c *check.C) {
 	body := strings.NewReader(`{"name": "xyz", "memory": 9223372036854775807, "swap": 1024, "cpushare": 100 }`)
 	request, err := http.NewRequest("POST", "/plans", body)
 	c.Assert(err, check.IsNil)
-	request.Header.Set("Authorization", "bearer "+s.admintoken.GetValue())
+	request.Header.Set("Authorization", "bearer "+s.token.GetValue())
 	m := RunServer(true)
 	m.ServeHTTP(recorder, request)
 	c.Assert(recorder.Code, check.Equals, http.StatusCreated)
@@ -92,11 +107,11 @@ func (s *S) TestPlanAddDupp(c *check.C) {
 	c.Assert(plans, check.DeepEquals, []app.Plan{
 		{Name: "xyz", Memory: 9223372036854775807, Swap: 1024, CpuShare: 100},
 	})
-	body = strings.NewReader(`{"name": "xyz", "memory": 1, "swap": 2, "cpushare": 3 }`)
+	body = strings.NewReader(`{"name": "xyz", "memory": 9223372036854775807, "swap": 2, "cpushare": 3 }`)
 	recorder = httptest.NewRecorder()
 	request, err = http.NewRequest("POST", "/plans", body)
 	c.Assert(err, check.IsNil)
-	request.Header.Set("Authorization", "bearer "+s.admintoken.GetValue())
+	request.Header.Set("Authorization", "bearer "+s.token.GetValue())
 	m = RunServer(true)
 	m.ServeHTTP(recorder, request)
 	c.Assert(recorder.Code, check.Equals, http.StatusConflict)
@@ -139,7 +154,7 @@ func (s *S) TestPlanRemove(c *check.C) {
 	defer s.conn.Plans().RemoveAll(nil)
 	request, err := http.NewRequest("DELETE", "/plans/plan1", nil)
 	c.Assert(err, check.IsNil)
-	request.Header.Set("Authorization", "bearer "+s.admintoken.GetValue())
+	request.Header.Set("Authorization", "bearer "+s.token.GetValue())
 	m := RunServer(true)
 	m.ServeHTTP(recorder, request)
 	c.Assert(recorder.Code, check.Equals, http.StatusOK)
@@ -151,7 +166,8 @@ func (s *S) TestPlanRemove(c *check.C) {
 	})
 }
 
-func (s *S) TestPlanRemoveNonAdmin(c *check.C) {
+func (s *S) TestPlanRemoveNoPermission(c *check.C) {
+	token := userWithPermission(c)
 	recorder := httptest.NewRecorder()
 	plan := app.Plan{Name: "plan1", Memory: 1, Swap: 2, CpuShare: 3}
 	err := s.conn.Plans().Insert(plan)
@@ -159,7 +175,7 @@ func (s *S) TestPlanRemoveNonAdmin(c *check.C) {
 	defer s.conn.Plans().RemoveAll(nil)
 	request, err := http.NewRequest("DELETE", "/plans/"+plan.Name, nil)
 	c.Assert(err, check.IsNil)
-	request.Header.Set("Authorization", "bearer "+s.token.GetValue())
+	request.Header.Set("Authorization", "bearer "+token.GetValue())
 	m := RunServer(true)
 	m.ServeHTTP(recorder, request)
 	c.Assert(recorder.Code, check.Equals, http.StatusForbidden)
@@ -169,7 +185,7 @@ func (s *S) TestPlanRemoveInvalid(c *check.C) {
 	recorder := httptest.NewRecorder()
 	request, err := http.NewRequest("DELETE", "/plans/plan999", nil)
 	c.Assert(err, check.IsNil)
-	request.Header.Set("Authorization", "bearer "+s.admintoken.GetValue())
+	request.Header.Set("Authorization", "bearer "+s.token.GetValue())
 	m := RunServer(true)
 	m.ServeHTTP(recorder, request)
 	c.Assert(recorder.Code, check.Equals, http.StatusNotFound)
@@ -188,7 +204,7 @@ func (s *S) TestRoutersList(c *check.C) {
 	}
 	request, err := http.NewRequest("GET", "/plans/routers", nil)
 	c.Assert(err, check.IsNil)
-	request.Header.Set("Authorization", "bearer "+s.admintoken.GetValue())
+	request.Header.Set("Authorization", "bearer "+s.token.GetValue())
 	m := RunServer(true)
 	m.ServeHTTP(recorder, request)
 	c.Assert(recorder.Code, check.Equals, http.StatusOK)
@@ -199,15 +215,16 @@ func (s *S) TestRoutersList(c *check.C) {
 	c.Assert(routers, check.DeepEquals, expected)
 }
 
-func (s *S) TestRoutersListNonAdmin(c *check.C) {
+func (s *S) TestRoutersListNoPlanCreatePermission(c *check.C) {
 	config.Set("routers:router1:type", "foo")
 	config.Set("routers:router2:type", "bar")
 	defer config.Unset("routers:router1:type")
 	defer config.Unset("routers:router2:type")
+	token := userWithPermission(c)
 	recorder := httptest.NewRecorder()
 	request, err := http.NewRequest("GET", "/plans/routers", nil)
 	c.Assert(err, check.IsNil)
-	request.Header.Set("Authorization", "bearer "+s.token.GetValue())
+	request.Header.Set("Authorization", "bearer "+token.GetValue())
 	m := RunServer(true)
 	m.ServeHTTP(recorder, request)
 	c.Assert(recorder.Code, check.Equals, http.StatusForbidden)
@@ -225,7 +242,7 @@ func (s *S) TestChangePlan(c *check.C) {
 		c.Assert(err, check.IsNil)
 		defer app.PlanRemove(plan.Name)
 	}
-	a := app.App{Name: "someapp", Platform: "zend", Teams: []string{s.team.Name}, Plan: plans[1]}
+	a := app.App{Name: "someapp", Platform: "zend", TeamOwner: s.team.Name, Plan: plans[1]}
 	err := app.CreateApp(&a, s.user)
 	c.Assert(err, check.IsNil)
 	defer s.logConn.Logs(a.Name).DropCollection()
@@ -247,7 +264,7 @@ func (s *S) TestChangePlanNotFound(c *check.C) {
 	err := plan.Save()
 	c.Assert(err, check.IsNil)
 	defer app.PlanRemove(plan.Name)
-	a := app.App{Name: "someapp", Platform: "zend", Teams: []string{s.team.Name}, Plan: plan}
+	a := app.App{Name: "someapp", Platform: "zend", TeamOwner: s.team.Name, Plan: plan}
 	err = app.CreateApp(&a, s.user)
 	c.Assert(err, check.IsNil)
 	defer s.logConn.Logs(a.Name).DropCollection()

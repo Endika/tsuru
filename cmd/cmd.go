@@ -16,9 +16,10 @@ import (
 	"strings"
 
 	"github.com/sajari/fuzzy"
+	"github.com/tsuru/gnuflag"
 	"github.com/tsuru/tsuru/errors"
 	"github.com/tsuru/tsuru/fs"
-	"launchpad.net/gnuflag"
+	"github.com/tsuru/tsuru/net"
 )
 
 var ErrAbortCommand = gerrors.New("")
@@ -94,6 +95,35 @@ func (m *Manager) RegisterDeprecated(command Command, oldName string) {
 	}
 	m.Commands[name] = command
 	m.Commands[oldName] = &DeprecatedCommand{Command: command, oldName: oldName}
+}
+
+type RemovedCommand struct {
+	name string
+	help string
+}
+
+func (c *RemovedCommand) Info() *Info {
+	return &Info{
+		Name:  c.name,
+		Usage: c.name,
+		Desc:  fmt.Sprintf("This command was removed. %s", c.help),
+		fail:  true,
+	}
+}
+
+func (c *RemovedCommand) Run(context *Context, client *Client) error {
+	return ErrAbortCommand
+}
+
+func (m *Manager) RegisterRemoved(name string, help string) {
+	if m.Commands == nil {
+		m.Commands = make(map[string]Command)
+	}
+	_, found := m.Commands[name]
+	if found {
+		panic(fmt.Sprintf("command already registered: %s", name))
+	}
+	m.Commands[name] = &RemovedCommand{name: name, help: help}
 }
 
 func (m *Manager) RegisterTopic(name, content string) {
@@ -180,6 +210,11 @@ func (m *Manager) Run(args []string) {
 		m.finisher().Exit(1)
 		return
 	}
+	if info.fail {
+		command = m.Commands["help"]
+		args = []string{name}
+		status = 1
+	}
 	if length := len(args); (length < info.MinArgs || (info.MaxArgs > 0 && length > info.MaxArgs)) &&
 		name != "help" {
 		m.wrong = true
@@ -189,7 +224,7 @@ func (m *Manager) Run(args []string) {
 		status = 1
 	}
 	context := m.newContext(args, m.stdout, m.stderr, m.stdin)
-	client := NewClient(&http.Client{}, context, m)
+	client := NewClient(net.Dial5FullUnlimitedClient, context, m)
 	client.Verbosity = verbosity
 	err = command.Run(context, client)
 	if err == errUnauthorized && name != "login" {
@@ -321,6 +356,7 @@ type Info struct {
 	MaxArgs int
 	Usage   string
 	Desc    string
+	fail    bool
 }
 
 // Implementing the Commandable interface allows extending
@@ -382,6 +418,12 @@ func (c *help) Run(context *Context, client *Client) error {
 			}
 		}
 		sort.Strings(commands)
+		maxCmdSize := 20
+		for _, command := range commands {
+			if len(command) > maxCmdSize {
+				maxCmdSize = len(command)
+			}
+		}
 		for _, command := range commands {
 			description := c.manager.Commands[command].Info().Desc
 			description = strings.Split(description, "\n")[0]
@@ -389,7 +431,8 @@ func (c *help) Run(context *Context, client *Client) error {
 			if len(description) > 2 {
 				description = strings.ToUpper(description[:1]) + description[1:]
 			}
-			output += fmt.Sprintf("  %-20s %s\n", command, description)
+			fmtStr := fmt.Sprintf("  %%-%ds %%s\n", maxCmdSize)
+			output += fmt.Sprintf(fmtStr, command, description)
 		}
 		output += fmt.Sprintf("\nUse %s help <commandname> to get more information about a command.\n", c.manager.name)
 		if len(c.manager.topics) > 0 {

@@ -5,6 +5,7 @@
 package ec2
 
 import (
+	"encoding/base64"
 	"fmt"
 	"reflect"
 	"strconv"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/credentials"
+	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/tsuru/monsterqueue"
 	"github.com/tsuru/tsuru/iaas"
@@ -55,7 +57,7 @@ func (i *EC2IaaS) createEC2Handler(regionOrEndpoint string) (*ec2.EC2, error) {
 		Region:      aws.String(region),
 		Endpoint:    aws.String(endpoint),
 	}
-	return ec2.New(&config), nil
+	return ec2.New(session.New(&config)), nil
 }
 
 func (i *EC2IaaS) waitForDnsName(ec2Inst *ec2.EC2, instance *ec2.Instance) (*ec2.Instance, error) {
@@ -221,7 +223,7 @@ func (i *EC2IaaS) CreateMachine(params map[string]string) (*iaas.Machine, error)
 	if err != nil {
 		return nil, err
 	}
-	options.UserData = aws.String(userData)
+	options.UserData = aws.String(base64.StdEncoding.EncodeToString([]byte(userData)))
 	if options.ImageId == nil || *options.ImageId == "" {
 		return nil, fmt.Errorf("the parameter %q is required", "imageid")
 	}

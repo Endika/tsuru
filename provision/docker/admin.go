@@ -10,8 +10,8 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/tsuru/gnuflag"
 	"github.com/tsuru/tsuru/cmd"
-	"launchpad.net/gnuflag"
 )
 
 type moveContainersCmd struct{}
@@ -50,29 +50,6 @@ func (c *moveContainersCmd) Run(context *cmd.Context, client *cmd.Client) error 
 		return err
 	}
 	return cmd.StreamJSONResponse(context.Stdout, response)
-}
-
-type fixContainersCmd struct{}
-
-func (fixContainersCmd) Info() *cmd.Info {
-	return &cmd.Info{
-		Name:  "fix-containers",
-		Usage: "fix-containers",
-		Desc:  "Fix containers that are broken in the cluster.",
-	}
-}
-
-func (fixContainersCmd) Run(context *cmd.Context, client *cmd.Client) error {
-	url, err := cmd.GetURL("/docker/fix-containers")
-	if err != nil {
-		return err
-	}
-	request, err := http.NewRequest("POST", url, nil)
-	if err != nil {
-		return err
-	}
-	_, err = client.Do(request)
-	return err
 }
 
 type moveContainerCmd struct{}

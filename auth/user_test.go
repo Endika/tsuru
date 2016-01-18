@@ -188,64 +188,9 @@ func (s *S) TestRemoveKeyDisabled(c *check.C) {
 	c.Assert(err, check.Equals, ErrKeyDisabled)
 }
 
-func (s *S) TestTeams(c *check.C) {
-	u := User{Email: "me@tsuru.com", Password: "123"}
-	err := u.Create()
-	c.Assert(err, check.IsNil)
-	defer u.Delete()
-	s.team.AddUser(&u)
-	err = s.conn.Teams().Update(bson.M{"_id": s.team.Name}, s.team)
-	c.Assert(err, check.IsNil)
-	defer func(u *User, t *Team) {
-		t.RemoveUser(u)
-		s.conn.Teams().Update(bson.M{"_id": t.Name}, t)
-	}(&u, s.team)
-	t := Team{Name: "abc", Users: []string{u.Email}}
-	err = s.conn.Teams().Insert(t)
-	c.Assert(err, check.IsNil)
-	defer s.conn.Teams().Remove(bson.M{"_id": t.Name})
-	teams, err := u.Teams()
-	c.Assert(err, check.IsNil)
-	c.Assert(teams, check.HasLen, 2)
-	c.Assert(teams[0].Name, check.Equals, s.team.Name)
-	c.Assert(teams[1].Name, check.Equals, t.Name)
-}
-
-func (s *S) TestIsAdminReturnsTrueWhenUserHasATeamNamedWithAdminTeamConf(c *check.C) {
-	adminTeamName, err := config.GetString("admin-team")
-	c.Assert(err, check.IsNil)
-	t := Team{Name: adminTeamName, Users: []string{s.user.Email}}
-	err = s.conn.Teams().Insert(&t)
-	c.Assert(err, check.IsNil)
-	defer s.conn.Teams().RemoveId(t.Name)
-	c.Assert(s.user.IsAdmin(), check.Equals, true)
-}
-
-func (s *S) TestIsAdminReturnsFalseWhenUserDoNotHaveATeamNamedWithAdminTeamConf(c *check.C) {
-	c.Assert(s.user.IsAdmin(), check.Equals, false)
-}
-
 type testApp struct {
 	Name  string
 	Teams []string
-}
-
-func (s *S) TestUserAllowedApps(c *check.C) {
-	team := Team{Name: "teamname", Users: []string{s.user.Email}}
-	err := s.conn.Teams().Insert(&team)
-	c.Assert(err, check.IsNil)
-	a := testApp{Name: "myapp", Teams: []string{s.team.Name}}
-	err = s.conn.Apps().Insert(&a)
-	c.Assert(err, check.IsNil)
-	a2 := testApp{Name: "myotherapp", Teams: []string{team.Name}}
-	err = s.conn.Apps().Insert(&a2)
-	c.Assert(err, check.IsNil)
-	defer func() {
-		s.conn.Apps().RemoveAll(bson.M{"name": bson.M{"$in": []string{a.Name, a2.Name}}})
-		s.conn.Teams().RemoveId(team.Name)
-	}()
-	aApps, err := s.user.AllowedApps()
-	c.Assert(aApps, check.DeepEquals, []string{a.Name, a2.Name})
 }
 
 func (s *S) TestListKeysShouldGetKeysFromTheRepositoryManager(c *check.C) {
@@ -319,7 +264,7 @@ func (s *S) TestListAllUsers(c *check.C) {
 	c.Assert(len(users), check.Equals, 1)
 }
 
-type roleInstanceList []roleInstance
+type roleInstanceList []RoleInstance
 
 func (l roleInstanceList) Len() int      { return len(l) }
 func (l roleInstanceList) Swap(i, j int) { l[i], l[j] = l[j], l[i] }
@@ -351,7 +296,7 @@ func (s *S) TestUserAddRole(c *check.C) {
 	c.Assert(err, check.IsNil)
 	err = u.AddRole("r3", "a")
 	c.Assert(err, check.Equals, permission.ErrRoleNotFound)
-	expected := []roleInstance{
+	expected := []RoleInstance{
 		{Name: "r1", ContextValue: "c1"},
 		{Name: "r1", ContextValue: "c2"},
 		{Name: "r2", ContextValue: "x"},
@@ -369,7 +314,7 @@ func (s *S) TestUserRemoveRole(c *check.C) {
 	u := User{
 		Email:    "me@tsuru.com",
 		Password: "123",
-		Roles: []roleInstance{
+		Roles: []RoleInstance{
 			{Name: "r1", ContextValue: "c1"},
 			{Name: "r1", ContextValue: "c2"},
 			{Name: "r2", ContextValue: "x"},
@@ -381,7 +326,7 @@ func (s *S) TestUserRemoveRole(c *check.C) {
 	c.Assert(err, check.IsNil)
 	err = u.RemoveRole("r1", "c2")
 	c.Assert(err, check.IsNil)
-	expected := []roleInstance{
+	expected := []RoleInstance{
 		{Name: "r1", ContextValue: "c1"},
 		{Name: "r2", ContextValue: "x"},
 	}
@@ -412,9 +357,55 @@ func (s *S) TestUserPermissions(c *check.C) {
 	perms, err = u.Permissions()
 	c.Assert(err, check.IsNil)
 	c.Assert(perms, check.DeepEquals, []permission.Permission{
-		{Scheme: permission.PermAppDeploy, Context: permission.Context{CtxType: permission.CtxApp, Value: "myapp"}},
-		{Scheme: permission.PermAppUpdateEnv, Context: permission.Context{CtxType: permission.CtxApp, Value: "myapp"}},
-		{Scheme: permission.PermAppDeploy, Context: permission.Context{CtxType: permission.CtxApp, Value: "myapp2"}},
-		{Scheme: permission.PermAppUpdateEnv, Context: permission.Context{CtxType: permission.CtxApp, Value: "myapp2"}},
+		{Scheme: permission.PermAppDeploy, Context: permission.Context(permission.CtxApp, "myapp")},
+		{Scheme: permission.PermAppUpdateEnv, Context: permission.Context(permission.CtxApp, "myapp")},
+		{Scheme: permission.PermAppDeploy, Context: permission.Context(permission.CtxApp, "myapp2")},
+		{Scheme: permission.PermAppUpdateEnv, Context: permission.Context(permission.CtxApp, "myapp2")},
 	})
+}
+
+func (s *S) TestListUsersWithPermissions(c *check.C) {
+	u1 := User{Email: "me1@tsuru.com", Password: "123"}
+	err := u1.Create()
+	c.Assert(err, check.IsNil)
+	u2 := User{Email: "me2@tsuru.com", Password: "123"}
+	err = u2.Create()
+	c.Assert(err, check.IsNil)
+	r1, err := permission.NewRole("r1", "app")
+	c.Assert(err, check.IsNil)
+	err = r1.AddPermissions("app.update.env", "app.deploy")
+	c.Assert(err, check.IsNil)
+	err = u1.AddRole("r1", "myapp1")
+	c.Assert(err, check.IsNil)
+	err = u2.AddRole("r1", "myapp2")
+	c.Assert(err, check.IsNil)
+	users, err := ListUsersWithPermissions(permission.Permission{
+		Scheme:  permission.PermAppDeploy,
+		Context: permission.Context(permission.CtxApp, "myapp1"),
+	})
+	c.Assert(err, check.IsNil)
+	c.Assert(users, check.HasLen, 1)
+	c.Assert(users[0].Email, check.Equals, u1.Email)
+	users, err = ListUsersWithPermissions(permission.Permission{
+		Scheme:  permission.PermAppDeploy,
+		Context: permission.Context(permission.CtxApp, "myapp2"),
+	})
+	c.Assert(err, check.IsNil)
+	c.Assert(users, check.HasLen, 1)
+	c.Assert(users[0].Email, check.Equals, u2.Email)
+}
+
+func (s *S) TestAddRolesForEvent(c *check.C) {
+	r1, err := permission.NewRole("r1", "team")
+	c.Assert(err, check.IsNil)
+	err = r1.AddEvent(permission.RoleEventTeamCreate.String())
+	c.Assert(err, check.IsNil)
+	u1 := User{Email: "me1@tsuru.com", Password: "123"}
+	err = u1.Create()
+	c.Assert(err, check.IsNil)
+	err = u1.AddRolesForEvent(permission.RoleEventTeamCreate, "team1")
+	c.Assert(err, check.IsNil)
+	u, err := GetUserByEmail(u1.Email)
+	c.Assert(err, check.IsNil)
+	c.Assert(u.Roles, check.DeepEquals, []RoleInstance{{Name: "r1", ContextValue: "team1"}})
 }

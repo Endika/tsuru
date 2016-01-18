@@ -1,4 +1,4 @@
-// Copyright 2015 tsuru authors. All rights reserved.
+// Copyright 2016 tsuru authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -19,8 +19,15 @@ import (
 var (
 	ErrInvalidStatus = errors.New("invalid status")
 	ErrEmptyApp      = errors.New("no units for this app")
-	ErrUnitNotFound  = errors.New("unit not found")
 )
+
+type UnitNotFoundError struct {
+	ID string
+}
+
+func (e *UnitNotFoundError) Error() string {
+	return fmt.Sprintf("unit %q not found", e.ID)
+}
 
 type InvalidProcessError struct {
 	Msg string
@@ -169,6 +176,7 @@ type App interface {
 	GetSwap() int64
 	GetCpuShare() int
 
+	SetUpdatePlatform(bool) error
 	GetUpdatePlatform() bool
 
 	GetRouter() (string, error)
@@ -203,12 +211,6 @@ type ShellOptions struct {
 // ArchiveDeployer is a provisioner that can deploy archives.
 type ArchiveDeployer interface {
 	ArchiveDeploy(app App, archiveURL string, w io.Writer) (string, error)
-}
-
-// GitDeployer is a provisioner that can deploy the application from a Git
-// repository.
-type GitDeployer interface {
-	GitDeploy(app App, version string, w io.Writer) (string, error)
 }
 
 // UploadDeployer is a provisioner that can deploy the application from an
@@ -297,6 +299,9 @@ type Provisioner interface {
 
 	// Returns the metric backend environs for the app.
 	MetricEnvs(App) map[string]string
+
+	// Rollback a deploy
+	Rollback(App, string, io.Writer) (string, error)
 }
 
 type MessageProvisioner interface {
@@ -309,11 +314,27 @@ type InitializableProvisioner interface {
 	Initialize() error
 }
 
+// Provisioners can implement this interface to optionaly disable logs for a
+// given app.
+type OptionalLogsProvisioner interface {
+	// Checks if logs are enabled for given app.
+	LogsEnabled(App) (bool, string, error)
+}
+
+// PlatformOptions is the set of options provided to PlatformAdd and
+// PlatformUpdate, in the ExtensibleProvisioner.
+type PlatformOptions struct {
+	Name   string
+	Args   map[string]string
+	Input  io.Reader
+	Output io.Writer
+}
+
 // ExtensibleProvisioner is a provisioner where administrators can manage
 // platforms (automatically adding, removing and updating platforms).
 type ExtensibleProvisioner interface {
-	PlatformAdd(name string, args map[string]string, w io.Writer) error
-	PlatformUpdate(name string, args map[string]string, w io.Writer) error
+	PlatformAdd(PlatformOptions) error
+	PlatformUpdate(PlatformOptions) error
 	PlatformRemove(name string) error
 }
 

@@ -38,7 +38,6 @@ var _ = check.Suite(&S{})
 func (s *S) SetUpSuite(c *check.C) {
 	config.Set("auth:token-expire-days", 2)
 	config.Set("auth:hash-cost", bcrypt.MinCost)
-	config.Set("admin-team", "admin")
 	config.Set("database:url", "127.0.0.1:27017")
 	config.Set("database:name", "tsuru_auth_test")
 	s.conn, _ = db.Conn()
@@ -51,6 +50,7 @@ func (s *S) SetUpSuite(c *check.C) {
 }
 
 func (s *S) TearDownSuite(c *check.C) {
+	s.conn.Users().Database.DropDatabase()
 	s.conn.Close()
 }
 
@@ -60,7 +60,7 @@ func (s *S) SetUpTest(c *check.C) {
 	s.user = &User{Email: "timeredbull@globo.com", Password: "123456"}
 	s.user.Create()
 	s.hashed = s.user.Password
-	team := &Team{Name: "cobrateam", Users: []string{s.user.Email}}
+	team := &Team{Name: "cobrateam"}
 	err = s.conn.Teams().Insert(team)
 	c.Assert(err, check.IsNil)
 	s.team = team

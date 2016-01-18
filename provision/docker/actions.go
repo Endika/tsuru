@@ -1,4 +1,4 @@
-// Copyright 2015 tsuru authors. All rights reserved.
+// Copyright 2016 tsuru authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -63,14 +63,14 @@ func runInContainers(containers []container.Container, callback callbackFunc, ro
 	}
 	step := len(containers)/workers + 1
 	toRollback := make(chan *container.Container, len(containers))
-	errors := make(chan error, len(containers))
+	errs := make(chan error, len(containers))
 	var wg sync.WaitGroup
 	runFunc := func(start, end int) error {
 		defer wg.Done()
 		for i := start; i < end; i++ {
 			err := callback(&containers[i], toRollback)
 			if err != nil {
-				errors <- err
+				errs <- err
 				return err
 			}
 		}
@@ -92,9 +92,9 @@ func runInContainers(containers []container.Container, callback callbackFunc, ro
 		}
 	}
 	wg.Wait()
-	close(errors)
+	close(errs)
 	close(toRollback)
-	if err := <-errors; err != nil {
+	if err := <-errs; err != nil {
 		if rollback != nil {
 			for c := range toRollback {
 				rollback(c)
@@ -182,6 +182,55 @@ var createContainer = action.Action{
 		if err != nil {
 			log.Errorf("Failed to remove the container %q: %s", c.ID, err)
 		}
+	},
+}
+
+var createContainerFromImage = action.Action{
+	Name: "create-container-from-image",
+	Forward: func(ctx action.FWContext) (action.Result, error) {
+		cont := ctx.Previous.(container.Container)
+		args := ctx.Params[0].(runContainerActionsArgs)
+		log.Debugf("create container from image for app %s, based on image %s, with cmds %s", args.app.GetName(), args.imageID, args.commands)
+		err := cont.Create(&container.CreateArgs{
+			ImageID:          args.imageID,
+			Commands:         args.commands,
+			App:              args.app,
+			Deploy:           args.isDeploy,
+			Provisioner:      args.provisioner,
+			DestinationHosts: args.destinationHosts,
+			ProcessName:      args.processName,
+		})
+		if err != nil {
+			log.Errorf("error on create container for app %s - %s", args.app.GetName(), err)
+			return nil, err
+		}
+		return cont, nil
+	},
+	Backward: func(ctx action.BWContext) {
+		c := ctx.FWResult.(container.Container)
+		args := ctx.Params[0].(runContainerActionsArgs)
+		err := args.provisioner.Cluster().RemoveContainer(docker.RemoveContainerOptions{ID: c.ID})
+		if err != nil {
+			log.Errorf("Failed to remove the container %q: %s", c.ID, err)
+		}
+	},
+}
+
+var setContainerID = action.Action{
+	Name: "set-container-id",
+	Forward: func(ctx action.FWContext) (action.Result, error) {
+		args := ctx.Params[0].(runContainerActionsArgs)
+		coll := args.provisioner.Collection()
+		defer coll.Close()
+		cont := ctx.Previous.(container.Container)
+		err := coll.Update(bson.M{"name": cont.Name}, bson.M{"$set": bson.M{"id": cont.ID}})
+		if err != nil {
+			log.Errorf("error on setting container ID %s - %s", cont.Name, err)
+			return nil, err
+		}
+		return cont, nil
+	},
+	Backward: func(ctx action.BWContext) {
 	},
 }
 
@@ -343,7 +392,7 @@ var bindAndHealthcheck = action.Action{
 				log.Errorf("Removed binding for unit %q: %s", c.ID, err)
 				continue
 			}
-			fmt.Fprintf(w, " ---> Unbinded unit %s [%s]\n", c.ShortID(), c.ProcessName)
+			fmt.Fprintf(w, " ---> Removed bind for unit %s [%s]\n", c.ShortID(), c.ProcessName)
 		}
 	},
 	OnError: rollbackNotice,
@@ -378,9 +427,11 @@ var addNewRoutes = action.Action{
 			if c.ProcessName != webProcessName {
 				return nil
 			}
-			err = r.AddRoute(c.AppName, c.Address())
-			if err != nil {
-				return err
+			if c.HostPort != "0" && c.HostPort != "" {
+				err = r.AddRoute(c.AppName, c.Address())
+				if err != nil {
+					return err
+				}
 			}
 			c.Routable = true
 			toRollback <- c

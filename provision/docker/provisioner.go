@@ -1,10 +1,11 @@
-// Copyright 2015 tsuru authors. All rights reserved.
+// Copyright 2016 tsuru authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
 package docker
 
 import (
+	"archive/tar"
 	"bytes"
 	stderr "errors"
 	"fmt"
@@ -33,14 +34,15 @@ import (
 	"github.com/tsuru/tsuru/provision/docker/healer"
 	"github.com/tsuru/tsuru/router"
 	_ "github.com/tsuru/tsuru/router/galeb"
-	_ "github.com/tsuru/tsuru/router/galebv2"
 	_ "github.com/tsuru/tsuru/router/hipache"
 	_ "github.com/tsuru/tsuru/router/routertest"
 	_ "github.com/tsuru/tsuru/router/vulcand"
+	"gopkg.in/mgo.v2"
 	"gopkg.in/mgo.v2/bson"
 )
 
 var mainDockerProvisioner *dockerProvisioner
+var ErrEntrypointOrProcfileNotFound = stderr.New("You should provide a entrypoint in image or a Procfile in the following locations: /home/application/current or /app/user or /.")
 
 func init() {
 	mainDockerProvisioner = &dockerProvisioner{}
@@ -252,6 +254,10 @@ func (p *dockerProvisioner) Initialize() error {
 	if err != nil {
 		return err
 	}
+	err = registerRoutesRebuildTask()
+	if err != nil {
+		return err
+	}
 	return p.initDockerCluster()
 }
 
@@ -284,9 +290,10 @@ func (p *dockerProvisioner) Restart(a provision.App, process string, w io.Writer
 			toAdd[c.ProcessName] = &containersToAdd{Quantity: 0}
 		}
 		toAdd[c.ProcessName].Quantity++
-		toAdd[c.ProcessName].Status = provision.Status(c.Status)
+		toAdd[c.ProcessName].Status = provision.StatusStarted
 	}
 	_, err = p.runReplaceUnitsPipeline(writer, a, toAdd, containers, imageId)
+	routesRebuildOrEnqueue(a.GetName())
 	return err
 }
 
@@ -303,7 +310,7 @@ func (p *dockerProvisioner) Start(app provision.App, process string) error {
 		if err != nil {
 			return err
 		}
-		c.SetStatus(p, provision.StatusStarting.String(), true)
+		c.SetStatus(p, provision.StatusStarting, true)
 		if info, err := c.NetworkInfo(p); err == nil {
 			p.fixContainer(c, info)
 		}
@@ -334,15 +341,64 @@ func (p *dockerProvisioner) Swap(app1, app2 provision.App) error {
 	return r.Swap(app1.GetName(), app2.GetName())
 }
 
+func (p *dockerProvisioner) Rollback(app provision.App, imageId string, w io.Writer) (string, error) {
+	return imageId, p.deploy(app, imageId, w)
+}
+
 func (p *dockerProvisioner) ImageDeploy(app provision.App, imageId string, w io.Writer) (string, error) {
-	isValid, err := isValidAppImage(app.GetName(), imageId)
+	cluster := p.Cluster()
+	pullOpts := docker.PullImageOptions{
+		Repository: imageId,
+	}
+	err := cluster.PullImage(pullOpts, docker.AuthConfiguration{})
 	if err != nil {
 		return "", err
 	}
-	if !isValid {
-		return "", fmt.Errorf("invalid image for app %s: %s", app.GetName(), imageId)
+	cmd := "cat /home/application/current/Procfile || cat /app/user/Procfile || cat /Procfile"
+	output, err := p.runCommandInContainer(imageId, cmd, app)
+	if err != nil {
+		return "", err
 	}
-	return imageId, p.deploy(app, imageId, w)
+	procfile := getProcessesFromProcfile(output.String())
+	if len(procfile) == 0 {
+		imageInspect, inspectErr := cluster.InspectImage(imageId)
+		if inspectErr != nil {
+			return "", inspectErr
+		}
+		if len(imageInspect.Config.Entrypoint) == 0 {
+			return "", ErrEntrypointOrProcfileNotFound
+		}
+		procfile["web"] = strings.Join(imageInspect.Config.Entrypoint, " ")
+	}
+	newImage, err := appNewImageName(app.GetName())
+	if err != nil {
+		return "", err
+	}
+	imageInfo := strings.Split(newImage, ":")
+	err = cluster.TagImage(imageId, docker.TagImageOptions{Repo: strings.Join(imageInfo[:len(imageInfo)-1], ":"), Tag: imageInfo[len(imageInfo)-1], Force: true})
+	if err != nil {
+		return "", err
+	}
+	registry, err := config.GetString("docker:registry")
+	if err != nil {
+		return "", err
+	}
+	pushOpts := docker.PushImageOptions{
+		Name:     strings.Join(imageInfo[:len(imageInfo)-1], ":"),
+		Tag:      imageInfo[len(imageInfo)-1],
+		Registry: registry,
+	}
+	err = cluster.PushImage(pushOpts, mainDockerProvisioner.RegistryAuthConfig())
+	if err != nil {
+		return "", err
+	}
+	imageData := createImageMetadata(newImage, procfile)
+	err = saveImageCustomData(newImage, imageData.CustomData)
+	if err != nil {
+		return "", err
+	}
+	app.SetUpdatePlatform(true)
+	return newImage, p.deploy(app, newImage, w)
 }
 
 func (p *dockerProvisioner) GitDeploy(app provision.App, version string, w io.Writer) (string, error) {
@@ -458,13 +514,11 @@ func (p *dockerProvisioner) deploy(a provision.App, imageId string, w io.Writer)
 		}
 		_, err = p.runReplaceUnitsPipeline(w, a, toAdd, containers, imageId)
 	}
+	routesRebuildOrEnqueue(a.GetName())
 	return err
 }
 
 func setQuota(app provision.App, toAdd map[string]*containersToAdd) error {
-	if quota := app.GetQuota(); quota.Unlimited() {
-		return nil
-	}
 	var total int
 	for _, ct := range toAdd {
 		total += ct.Quantity
@@ -532,7 +586,7 @@ func (p *dockerProvisioner) Destroy(app provision.App) error {
 	}
 	cluster := p.Cluster()
 	for _, imageId := range images {
-		err := cluster.RemoveImage(imageId)
+		err = cluster.RemoveImage(imageId)
 		if err != nil {
 			log.Errorf("Failed to remove image %s: %s", imageId, err.Error())
 		}
@@ -668,6 +722,7 @@ func (p *dockerProvisioner) AddUnits(a provision.App, units uint, process string
 		return nil, err
 	}
 	conts, err := p.runCreateUnitsPipeline(writer, a, map[string]*containersToAdd{process: {Quantity: int(units)}}, imageId)
+	routesRebuildOrEnqueue(a.GetName())
 	if err != nil {
 		return nil, err
 	}
@@ -746,7 +801,8 @@ func (p *dockerProvisioner) RemoveUnits(a provision.App, units uint, processName
 
 func (p *dockerProvisioner) SetUnitStatus(unit provision.Unit, status provision.Status) error {
 	cont, err := p.GetContainer(unit.ID)
-	if err == provision.ErrUnitNotFound && unit.Name != "" {
+
+	if _, ok := err.(*provision.UnitNotFoundError); ok && unit.Name != "" {
 		cont, err = p.GetContainerByName(unit.Name)
 	}
 	if err != nil {
@@ -758,7 +814,7 @@ func (p *dockerProvisioner) SetUnitStatus(unit provision.Unit, status provision.
 	if unit.AppName != "" && cont.AppName != unit.AppName {
 		return stderr.New("wrong app name")
 	}
-	err = cont.SetStatus(p, status.String(), true)
+	err = cont.SetStatus(p, status, true)
 	if err != nil {
 		return err
 	}
@@ -818,7 +874,6 @@ func (p *dockerProvisioner) AdminCommands() []cmd.Command {
 		&addNodeToSchedulerCmd{},
 		&removeNodeFromSchedulerCmd{},
 		&listNodesInTheSchedulerCmd{},
-		fixContainersCmd{},
 		&healer.ListHealingHistoryCmd{},
 		&autoScaleRunCmd{},
 		&listAutoScaleHistoryCmd{},
@@ -841,21 +896,50 @@ func (p *dockerProvisioner) Collection() *storage.Collection {
 }
 
 // PlatformAdd build and push a new docker platform to register
-func (p *dockerProvisioner) PlatformAdd(name string, args map[string]string, w io.Writer) error {
-	if args["dockerfile"] == "" {
-		return stderr.New("Dockerfile is required.")
-	}
-	if _, err := url.ParseRequestURI(args["dockerfile"]); err != nil {
-		return stderr.New("dockerfile parameter should be an url.")
+func (p *dockerProvisioner) PlatformAdd(opts provision.PlatformOptions) error {
+	return p.buildPlatform(opts.Name, opts.Args, opts.Output, opts.Input)
+}
+
+func (p *dockerProvisioner) PlatformUpdate(opts provision.PlatformOptions) error {
+	return p.buildPlatform(opts.Name, opts.Args, opts.Output, opts.Input)
+}
+
+func (p *dockerProvisioner) buildPlatform(name string, args map[string]string, w io.Writer, r io.Reader) error {
+	var inputStream io.Reader
+	var dockerfileURL string
+	if r != nil {
+		data, err := ioutil.ReadAll(r)
+		if err != nil {
+			return err
+		}
+		var buf bytes.Buffer
+		writer := tar.NewWriter(&buf)
+		writer.WriteHeader(&tar.Header{
+			Name: "Dockerfile",
+			Mode: 0644,
+			Size: int64(len(data)),
+		})
+		writer.Write(data)
+		writer.Close()
+		inputStream = &buf
+	} else {
+		dockerfileURL = args["dockerfile"]
+		if dockerfileURL == "" {
+			return stderr.New("Dockerfile is required")
+		}
+		if _, err := url.ParseRequestURI(dockerfileURL); err != nil {
+			return stderr.New("dockerfile parameter must be a URL")
+		}
 	}
 	imageName := platformImageName(name)
 	cluster := p.Cluster()
 	buildOptions := docker.BuildImageOptions{
 		Name:           imageName,
+		Pull:           true,
 		NoCache:        true,
 		RmTmpContainer: true,
-		Remote:         args["dockerfile"],
-		InputStream:    nil,
+		Remote:         dockerfileURL,
+		InputStream:    inputStream,
 		OutputStream:   w,
 	}
 	err := cluster.BuildImage(buildOptions)
@@ -875,10 +959,6 @@ func (p *dockerProvisioner) PlatformAdd(name string, args map[string]string, w i
 		tag = "latest"
 	}
 	return p.PushImage(imageName, tag)
-}
-
-func (p *dockerProvisioner) PlatformUpdate(name string, args map[string]string, w io.Writer) error {
-	return p.PlatformAdd(name, args, w)
 }
 
 func (p *dockerProvisioner) PlatformRemove(name string) error {
@@ -904,7 +984,7 @@ func (p *dockerProvisioner) Units(app provision.App) ([]provision.Unit, error) {
 
 func (p *dockerProvisioner) RoutableUnits(app provision.App) ([]provision.Unit, error) {
 	imageId, err := appCurrentImageName(app.GetName())
-	if err != nil {
+	if err != nil && err != errNoImagesAvailable {
 		return nil, err
 	}
 	webProcessName, err := getImageWebProcessName(imageId)
@@ -935,7 +1015,7 @@ func (p *dockerProvisioner) RegisterUnit(unit provision.Unit, customData map[str
 		}
 		return nil
 	}
-	err = cont.SetStatus(p, provision.StatusStarted.String(), true)
+	err = cont.SetStatus(p, provision.StatusStarted, true)
 	if err != nil {
 		return err
 	}
@@ -1005,21 +1085,59 @@ func (p *dockerProvisioner) Nodes(app provision.App) ([]cluster.Node, error) {
 
 func (p *dockerProvisioner) MetricEnvs(app provision.App) map[string]string {
 	envMap := map[string]string{}
-	bsConf, err := bs.LoadConfig()
-	if err != nil {
-		return envMap
-	}
-	envs, err := bsConf.EnvListForEndpoint("", app.GetPool())
+	envs, err := bs.EnvListForEndpoint("", app.GetPool())
 	if err != nil {
 		return envMap
 	}
 	for _, env := range envs {
+		// TODO(cezarsa): ugly as hell
 		if strings.HasPrefix(env, "METRICS_") {
 			slice := strings.SplitN(env, "=", 2)
 			envMap[slice[0]] = slice[1]
 		}
 	}
 	return envMap
+}
+
+func (p *dockerProvisioner) LogsEnabled(app provision.App) (bool, string, error) {
+	const (
+		logBackendsEnv      = "LOG_BACKENDS"
+		logDocKeyFormat     = "LOG_%s_DOC"
+		tsuruLogBackendName = "tsuru"
+	)
+	config, err := bs.LoadConfig([]string{app.GetPool()})
+	if err != nil {
+		if err == mgo.ErrNotFound {
+			return true, "", nil
+		}
+		return false, "", err
+	}
+	enabledBackends := config.PoolEntry(app.GetPool(), logBackendsEnv)
+	if enabledBackends == "" {
+		return true, "", nil
+	}
+	backendsList := strings.Split(enabledBackends, ",")
+	for i := range backendsList {
+		backendsList[i] = strings.TrimSpace(backendsList[i])
+		if backendsList[i] == tsuruLogBackendName {
+			return true, "", nil
+		}
+	}
+	var docs []string
+	for _, backendName := range backendsList {
+		keyName := fmt.Sprintf(logDocKeyFormat, strings.ToUpper(backendName))
+		backendDoc := config.PoolEntry(app.GetPool(), keyName)
+		var docLine string
+		if backendDoc == "" {
+			docLine = fmt.Sprintf("* %s", backendName)
+		} else {
+			docLine = fmt.Sprintf("* %s: %s", backendName, backendDoc)
+		}
+		docs = append(docs, docLine)
+	}
+	fullDoc := fmt.Sprintf("Logs not available through tsuru. Enabled log backends are:\n%s",
+		strings.Join(docs, "\n"))
+	return false, fullDoc, nil
 }
 
 func pluralize(str string, sz int) string {

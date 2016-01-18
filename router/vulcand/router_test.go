@@ -1,4 +1,4 @@
-// Copyright 2015 tsuru authors. All rights reserved.
+// Copyright 2016 tsuru authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -12,18 +12,18 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mailgun/vulcand/Godeps/_workspace/src/github.com/mailgun/scroll"
-	"github.com/mailgun/vulcand/api"
-	"github.com/mailgun/vulcand/engine"
-	"github.com/mailgun/vulcand/engine/memng"
-	"github.com/mailgun/vulcand/plugin/registry"
-	"github.com/mailgun/vulcand/supervisor"
 	"github.com/tsuru/config"
 	"github.com/tsuru/tsuru/db"
 	"github.com/tsuru/tsuru/db/dbtest"
 	"github.com/tsuru/tsuru/router"
 	"github.com/tsuru/tsuru/router/routertest"
 	"github.com/tsuru/tsuru/tsurutest"
+	"github.com/vulcand/vulcand/Godeps/_workspace/src/github.com/mailgun/scroll"
+	"github.com/vulcand/vulcand/api"
+	"github.com/vulcand/vulcand/engine"
+	"github.com/vulcand/vulcand/engine/memng"
+	"github.com/vulcand/vulcand/plugin/registry"
+	"github.com/vulcand/vulcand/supervisor"
 	"gopkg.in/check.v1"
 )
 
@@ -78,6 +78,13 @@ func (s *S) SetUpTest(c *check.C) {
 func (s *S) TearDownTest(c *check.C) {
 	s.vulcandServer.Close()
 	s.conn.Close()
+}
+
+func (s *S) TearDownSuite(c *check.C) {
+	conn, err := db.Conn()
+	c.Assert(err, check.IsNil)
+	defer conn.Close()
+	conn.Apps().Database.DropDatabase()
 }
 
 func (s *S) TestShouldBeRegistered(c *check.C) {

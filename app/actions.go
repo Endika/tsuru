@@ -15,6 +15,7 @@ import (
 	"github.com/tsuru/tsuru/auth"
 	"github.com/tsuru/tsuru/db"
 	"github.com/tsuru/tsuru/log"
+	"github.com/tsuru/tsuru/permission"
 	"github.com/tsuru/tsuru/quota"
 	"github.com/tsuru/tsuru/repository"
 	"github.com/tsuru/tsuru/router"
@@ -129,7 +130,12 @@ var exportEnvironmentsAction = action.Action{
 			{Name: "TSURU_APPDIR", Value: defaultAppDir},
 			{Name: "TSURU_APP_TOKEN", Value: t.GetValue()},
 		}
-		err = app.setEnvsToApp(envVars, false, false, nil)
+		err = app.setEnvsToApp(
+			bind.SetEnvApp{
+				Envs:          envVars,
+				PublicOnly:    false,
+				ShouldRestart: false,
+			}, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -141,7 +147,12 @@ var exportEnvironmentsAction = action.Action{
 		app, err := GetByName(app.Name)
 		if err == nil {
 			vars := []string{"TSURU_APPNAME", "TSURU_APPDIR", "TSURU_APP_TOKEN"}
-			app.UnsetEnvs(vars, false, nil)
+			app.UnsetEnvs(
+				bind.UnsetEnvApp{
+					VariableNames: vars,
+					PublicOnly:    false,
+					ShouldRestart: true,
+				}, nil)
 		}
 	},
 	MinParams: 1,
@@ -158,12 +169,32 @@ var createRepository = action.Action{
 		default:
 			return nil, errors.New("First parameter must be *App.")
 		}
-		var users []string
+		allowedPerms := []permission.Permission{
+			{
+				Scheme:  permission.PermAppDeploy,
+				Context: permission.Context(permission.CtxGlobal, ""),
+			},
+			{
+				Scheme:  permission.PermAppDeploy,
+				Context: permission.Context(permission.CtxPool, app.Pool),
+			},
+		}
 		for _, t := range app.GetTeams() {
-			users = append(users, t.Users...)
+			allowedPerms = append(allowedPerms, permission.Permission{
+				Scheme:  permission.PermAppDeploy,
+				Context: permission.Context(permission.CtxTeam, t.Name),
+			})
+		}
+		users, err := auth.ListUsersWithPermissions(allowedPerms...)
+		if err != nil {
+			return nil, err
+		}
+		userNames := make([]string, len(users))
+		for i := range users {
+			userNames[i] = users[i].Email
 		}
 		manager := repository.Manager()
-		err := manager.CreateRepository(app.Name, users)
+		err = manager.CreateRepository(app.Name, userNames)
 		if err != nil {
 			return nil, err
 		}

@@ -1,4 +1,4 @@
-// Copyright 2015 tsuru authors. All rights reserved.
+// Copyright 2016 tsuru authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -18,6 +18,7 @@ import (
 	"github.com/tsuru/docker-cluster/cluster"
 	"github.com/tsuru/tsuru/app"
 	"github.com/tsuru/tsuru/iaas"
+	"github.com/tsuru/tsuru/net"
 	"github.com/tsuru/tsuru/provision"
 	"github.com/tsuru/tsuru/provision/docker/dockertest"
 	"github.com/tsuru/tsuru/provision/provisiontest"
@@ -41,7 +42,7 @@ func (s *AutoScaleSuite) SetUpSuite(c *check.C) {
 
 func (s *AutoScaleSuite) SetUpTest(c *check.C) {
 	s.S.SetUpTest(c)
-	plan := app.Plan{Memory: 21000, Name: "default", CpuShare: 10}
+	plan := app.Plan{Memory: 4194304, Name: "default", CpuShare: 10}
 	err := plan.Save()
 	c.Assert(err, check.IsNil)
 	s.testRepoRollback = startTestRepositoryServer()
@@ -64,7 +65,7 @@ func (s *AutoScaleSuite) SetUpTest(c *check.C) {
 		cluster.Node{Address: url, Metadata: map[string]string{
 			"pool":     "pool1",
 			"iaas":     "my-scale-iaas",
-			"totalMem": "125000",
+			"totalMem": "25165824",
 		}},
 	)
 	c.Assert(err, check.IsNil)
@@ -89,7 +90,7 @@ func (s *AutoScaleSuite) SetUpTest(c *check.C) {
 	appStruct := &app.App{
 		Name: s.appInstance.GetName(),
 		Pool: "pool1",
-		Plan: app.Plan{Memory: 21000},
+		Plan: app.Plan{Memory: 4194304},
 	}
 	opts := provision.AddPoolOptions{Name: "pool1"}
 	err = provision.AddPool(opts)
@@ -151,9 +152,9 @@ func (s *AutoScaleSuite) TestAutoScaleConfigRun(c *check.C) {
 	c.Assert(logParts[2], check.Matches, `.*new machine created.*`)
 	c.Assert(logParts[5], check.Matches, `.*Rebalancing 4 units.*`)
 	// Also should have rebalanced
-	containers1, err := s.p.listContainersByHost(urlToHost(nodes[0].Address))
+	containers1, err := s.p.listContainersByHost(net.URLToHost(nodes[0].Address))
 	c.Assert(err, check.IsNil)
-	containers2, err := s.p.listContainersByHost(urlToHost(nodes[1].Address))
+	containers2, err := s.p.listContainersByHost(net.URLToHost(nodes[1].Address))
 	c.Assert(err, check.IsNil)
 	c.Assert(containers1, check.HasLen, 2)
 	c.Assert(containers2, check.HasLen, 2)
@@ -165,9 +166,9 @@ func (s *AutoScaleSuite) TestAutoScaleConfigRun(c *check.C) {
 	evts, err = listAutoScaleEvents(0, 0)
 	c.Assert(err, check.IsNil)
 	c.Assert(evts, check.HasLen, 1)
-	containers1Again, err := s.p.listContainersByHost(urlToHost(nodes[0].Address))
+	containers1Again, err := s.p.listContainersByHost(net.URLToHost(nodes[0].Address))
 	c.Assert(err, check.IsNil)
-	containers2Again, err := s.p.listContainersByHost(urlToHost(nodes[1].Address))
+	containers2Again, err := s.p.listContainersByHost(net.URLToHost(nodes[1].Address))
 	c.Assert(err, check.IsNil)
 	c.Assert(containers1, check.DeepEquals, containers1Again)
 	c.Assert(containers2, check.DeepEquals, containers2Again)
@@ -205,9 +206,9 @@ func (s *AutoScaleSuite) TestAutoScaleConfigRunNoRebalance(c *check.C) {
 	c.Assert(evts[0].Action, check.Equals, "add")
 	c.Assert(evts[0].Successful, check.Equals, true)
 	c.Assert(evts[0].Error, check.Equals, "")
-	containers1, err := s.p.listContainersByHost(urlToHost(nodes[0].Address))
+	containers1, err := s.p.listContainersByHost(net.URLToHost(nodes[0].Address))
 	c.Assert(err, check.IsNil)
-	containers2, err := s.p.listContainersByHost(urlToHost(nodes[1].Address))
+	containers2, err := s.p.listContainersByHost(net.URLToHost(nodes[1].Address))
 	c.Assert(err, check.IsNil)
 	c.Assert(containers1, check.HasLen, 4)
 	c.Assert(containers2, check.HasLen, 0)
@@ -218,9 +219,9 @@ func (s *AutoScaleSuite) TestAutoScaleConfigRunNoRebalance(c *check.C) {
 	evts, err = listAutoScaleEvents(0, 0)
 	c.Assert(err, check.IsNil)
 	c.Assert(evts, check.HasLen, 1)
-	containers1Again, err := s.p.listContainersByHost(urlToHost(nodes[0].Address))
+	containers1Again, err := s.p.listContainersByHost(net.URLToHost(nodes[0].Address))
 	c.Assert(err, check.IsNil)
-	containers2Again, err := s.p.listContainersByHost(urlToHost(nodes[1].Address))
+	containers2Again, err := s.p.listContainersByHost(net.URLToHost(nodes[1].Address))
 	c.Assert(err, check.IsNil)
 	c.Assert(containers1, check.DeepEquals, containers1Again)
 	c.Assert(containers2, check.DeepEquals, containers2Again)
@@ -254,9 +255,9 @@ func (s *AutoScaleSuite) TestAutoScaleConfigRunOnce(c *check.C) {
 	c.Assert(evts[0].Action, check.Equals, "add")
 	c.Assert(evts[0].Successful, check.Equals, true)
 	c.Assert(evts[0].Error, check.Equals, "")
-	containers1, err := s.p.listContainersByHost(urlToHost(nodes[0].Address))
+	containers1, err := s.p.listContainersByHost(net.URLToHost(nodes[0].Address))
 	c.Assert(err, check.IsNil)
-	containers2, err := s.p.listContainersByHost(urlToHost(nodes[1].Address))
+	containers2, err := s.p.listContainersByHost(net.URLToHost(nodes[1].Address))
 	c.Assert(err, check.IsNil)
 	c.Assert(containers1, check.HasLen, 2)
 	c.Assert(containers2, check.HasLen, 2)
@@ -283,7 +284,7 @@ func (s *AutoScaleSuite) TestAutoScaleConfigRunOnceNoContainersMultipleNodes(c *
 	node := cluster.Node{Address: otherUrl, Metadata: map[string]string{
 		"pool":     "pool1",
 		"iaas":     "my-scale-iaas",
-		"totalMem": "125000",
+		"totalMem": "25165824",
 	}}
 	err := s.p.cluster.Register(node)
 	c.Assert(err, check.IsNil)
@@ -334,11 +335,11 @@ func (s *AutoScaleSuite) TestAutoScaleConfigRunOnceMultipleNodes(c *check.C) {
 	c.Assert(evts[0].Error, check.Equals, "")
 	c.Assert(evts[0].Reason, check.Equals, "number of free slots is -4, adding 2 nodes")
 	c.Assert(evts[0].Nodes, check.HasLen, 2)
-	containers1, err := s.p.listContainersByHost(urlToHost(nodes[0].Address))
+	containers1, err := s.p.listContainersByHost(net.URLToHost(nodes[0].Address))
 	c.Assert(err, check.IsNil)
-	containers2, err := s.p.listContainersByHost(urlToHost(nodes[1].Address))
+	containers2, err := s.p.listContainersByHost(net.URLToHost(nodes[1].Address))
 	c.Assert(err, check.IsNil)
-	containers3, err := s.p.listContainersByHost(urlToHost(nodes[2].Address))
+	containers3, err := s.p.listContainersByHost(net.URLToHost(nodes[2].Address))
 	c.Assert(err, check.IsNil)
 	c.Assert(containers1, check.HasLen, 2)
 	c.Assert(containers2, check.HasLen, 2)
@@ -375,9 +376,9 @@ func (s *AutoScaleSuite) TestAutoScaleConfigRunOnceAddsAtLeastOne(c *check.C) {
 	c.Assert(evts[0].Error, check.Equals, "")
 	c.Assert(evts[0].Reason, check.Equals, "number of free slots is -1, adding 1 nodes")
 	c.Assert(evts[0].Nodes, check.HasLen, 1)
-	containers1, err := s.p.listContainersByHost(urlToHost(nodes[0].Address))
+	containers1, err := s.p.listContainersByHost(net.URLToHost(nodes[0].Address))
 	c.Assert(err, check.IsNil)
-	containers2, err := s.p.listContainersByHost(urlToHost(nodes[1].Address))
+	containers2, err := s.p.listContainersByHost(net.URLToHost(nodes[1].Address))
 	c.Assert(err, check.IsNil)
 	c.Assert(len(containers1) == 2 || len(containers2) == 2, check.Equals, true)
 }
@@ -422,9 +423,9 @@ func (s *AutoScaleSuite) TestAutoScaleConfigRunOnceMultipleNodesPartialError(c *
 	c.Assert(evts[0].Error, check.Equals, "")
 	c.Assert(evts[0].Nodes, check.HasLen, 1)
 	c.Assert(evts[0].Log, check.Matches, `(?s).*not all required nodes were created: error running bs task: API error.*`)
-	containers1, err := s.p.listContainersByHost(urlToHost(nodes[0].Address))
+	containers1, err := s.p.listContainersByHost(net.URLToHost(nodes[0].Address))
 	c.Assert(err, check.IsNil)
-	containers2, err := s.p.listContainersByHost(urlToHost(nodes[1].Address))
+	containers2, err := s.p.listContainersByHost(net.URLToHost(nodes[1].Address))
 	c.Assert(err, check.IsNil)
 	c.Assert(containers1, check.HasLen, 3)
 	c.Assert(containers2, check.HasLen, 3)
@@ -464,9 +465,9 @@ func (s *AutoScaleSuite) TestAutoScaleConfigRunRebalanceOnly(c *check.C) {
 	nodes, err := s.p.cluster.Nodes()
 	c.Assert(err, check.IsNil)
 	c.Assert(nodes, check.HasLen, 2)
-	containers1, err := s.p.listContainersByHost(urlToHost(nodes[0].Address))
+	containers1, err := s.p.listContainersByHost(net.URLToHost(nodes[0].Address))
 	c.Assert(err, check.IsNil)
-	containers2, err := s.p.listContainersByHost(urlToHost(nodes[1].Address))
+	containers2, err := s.p.listContainersByHost(net.URLToHost(nodes[1].Address))
 	c.Assert(err, check.IsNil)
 	c.Assert(containers1, check.HasLen, 2)
 	c.Assert(containers2, check.HasLen, 2)
@@ -498,9 +499,9 @@ func (s *AutoScaleSuite) TestAutoScaleConfigRunNoGroup(c *check.C) {
 	c.Assert(err, check.IsNil)
 	c.Assert(nodes, check.HasLen, 2)
 	c.Assert(nodes[0].Address, check.Not(check.Equals), nodes[1].Address)
-	containers1, err := s.p.listContainersByHost(urlToHost(nodes[0].Address))
+	containers1, err := s.p.listContainersByHost(net.URLToHost(nodes[0].Address))
 	c.Assert(err, check.IsNil)
-	containers2, err := s.p.listContainersByHost(urlToHost(nodes[1].Address))
+	containers2, err := s.p.listContainersByHost(net.URLToHost(nodes[1].Address))
 	c.Assert(err, check.IsNil)
 	c.Assert(containers1, check.HasLen, 2)
 	c.Assert(containers2, check.HasLen, 2)
@@ -580,8 +581,8 @@ func (s *AutoScaleSuite) TestAutoScaleConfigRunStress(c *check.C) {
 				GroupByMetadata: "pool",
 			}
 			defer wg.Done()
-			err := a.runOnce()
-			c.Assert(err, check.IsNil)
+			runErr := a.runOnce()
+			c.Assert(runErr, check.IsNil)
 		}()
 	}
 	wg.Wait()
@@ -598,9 +599,9 @@ func (s *AutoScaleSuite) TestAutoScaleConfigRunStress(c *check.C) {
 	c.Assert(evts[0].Action, check.Equals, "add")
 	c.Assert(evts[0].Successful, check.Equals, true)
 	c.Assert(evts[0].Error, check.Equals, "")
-	containers1, err := s.p.listContainersByHost(urlToHost(nodes[0].Address))
+	containers1, err := s.p.listContainersByHost(net.URLToHost(nodes[0].Address))
 	c.Assert(err, check.IsNil)
-	containers2, err := s.p.listContainersByHost(urlToHost(nodes[1].Address))
+	containers2, err := s.p.listContainersByHost(net.URLToHost(nodes[1].Address))
 	c.Assert(err, check.IsNil)
 	c.Assert(containers1, check.HasLen, 2)
 	c.Assert(containers2, check.HasLen, 2)
@@ -638,11 +639,11 @@ func (s *AutoScaleSuite) TestAutoScaleConfigRunMemoryBased(c *check.C) {
 	c.Assert(evts[0].Action, check.Equals, "add")
 	c.Assert(evts[0].Successful, check.Equals, true)
 	c.Assert(evts[0].Error, check.Equals, "")
-	c.Assert(evts[0].Reason, check.Equals, "can't add 21000 bytes to an existing node, adding 1 nodes")
+	c.Assert(evts[0].Reason, check.Equals, "can't add 4194304 bytes to an existing node, adding 1 nodes")
 	// Also should have rebalanced
-	containers1, err := s.p.listContainersByHost(urlToHost(nodes[0].Address))
+	containers1, err := s.p.listContainersByHost(net.URLToHost(nodes[0].Address))
 	c.Assert(err, check.IsNil)
-	containers2, err := s.p.listContainersByHost(urlToHost(nodes[1].Address))
+	containers2, err := s.p.listContainersByHost(net.URLToHost(nodes[1].Address))
 	c.Assert(err, check.IsNil)
 	c.Assert(containers1, check.HasLen, 2)
 	c.Assert(containers2, check.HasLen, 2)
@@ -654,9 +655,9 @@ func (s *AutoScaleSuite) TestAutoScaleConfigRunMemoryBased(c *check.C) {
 	evts, err = listAutoScaleEvents(0, 0)
 	c.Assert(err, check.IsNil)
 	c.Assert(evts, check.HasLen, 1)
-	containers1Again, err := s.p.listContainersByHost(urlToHost(nodes[0].Address))
+	containers1Again, err := s.p.listContainersByHost(net.URLToHost(nodes[0].Address))
 	c.Assert(err, check.IsNil)
-	containers2Again, err := s.p.listContainersByHost(urlToHost(nodes[1].Address))
+	containers2Again, err := s.p.listContainersByHost(net.URLToHost(nodes[1].Address))
 	c.Assert(err, check.IsNil)
 	c.Assert(containers1, check.DeepEquals, containers1Again)
 	c.Assert(containers2, check.DeepEquals, containers2Again)
@@ -699,13 +700,13 @@ func (s *AutoScaleSuite) TestAutoScaleConfigRunMemoryBasedMultipleNodes(c *check
 	c.Assert(evts[0].Successful, check.Equals, true)
 	c.Assert(evts[0].Error, check.Equals, "")
 	c.Assert(evts[0].Nodes, check.HasLen, 2)
-	c.Assert(evts[0].Reason, check.Equals, "can't add 21000 bytes to an existing node, adding 2 nodes")
+	c.Assert(evts[0].Reason, check.Equals, "can't add 4194304 bytes to an existing node, adding 2 nodes")
 	// Also should have rebalanced
-	containers1, err := s.p.listContainersByHost(urlToHost(nodes[0].Address))
+	containers1, err := s.p.listContainersByHost(net.URLToHost(nodes[0].Address))
 	c.Assert(err, check.IsNil)
-	containers2, err := s.p.listContainersByHost(urlToHost(nodes[1].Address))
+	containers2, err := s.p.listContainersByHost(net.URLToHost(nodes[1].Address))
 	c.Assert(err, check.IsNil)
-	containers3, err := s.p.listContainersByHost(urlToHost(nodes[2].Address))
+	containers3, err := s.p.listContainersByHost(net.URLToHost(nodes[2].Address))
 	c.Assert(err, check.IsNil)
 	c.Assert(containers1, check.HasLen, 3)
 	c.Assert(containers2, check.HasLen, 3)
@@ -718,11 +719,11 @@ func (s *AutoScaleSuite) TestAutoScaleConfigRunMemoryBasedMultipleNodes(c *check
 	evts, err = listAutoScaleEvents(0, 0)
 	c.Assert(err, check.IsNil)
 	c.Assert(evts, check.HasLen, 1)
-	containers1Again, err := s.p.listContainersByHost(urlToHost(nodes[0].Address))
+	containers1Again, err := s.p.listContainersByHost(net.URLToHost(nodes[0].Address))
 	c.Assert(err, check.IsNil)
-	containers2Again, err := s.p.listContainersByHost(urlToHost(nodes[1].Address))
+	containers2Again, err := s.p.listContainersByHost(net.URLToHost(nodes[1].Address))
 	c.Assert(err, check.IsNil)
-	containers3Again, err := s.p.listContainersByHost(urlToHost(nodes[2].Address))
+	containers3Again, err := s.p.listContainersByHost(net.URLToHost(nodes[2].Address))
 	c.Assert(err, check.IsNil)
 	c.Assert(containers1, check.DeepEquals, containers1Again)
 	c.Assert(containers2, check.DeepEquals, containers2Again)
@@ -742,7 +743,7 @@ func (s *AutoScaleSuite) TestAutoScaleConfigRunOnceMemoryBasedNoContainersMultip
 	node := cluster.Node{Address: otherUrl, Metadata: map[string]string{
 		"pool":     "pool1",
 		"iaas":     "my-scale-iaas",
-		"totalMem": "125000",
+		"totalMem": "25165824",
 	}}
 	err := s.p.cluster.Register(node)
 	c.Assert(err, check.IsNil)
@@ -794,9 +795,9 @@ func (s *AutoScaleSuite) TestAutoScaleConfigRunPriorityToCountBased(c *check.C) 
 	c.Assert(evts[0].Action, check.Equals, "add")
 	c.Assert(evts[0].Successful, check.Equals, true)
 	c.Assert(evts[0].Error, check.Equals, "")
-	containers1, err := s.p.listContainersByHost(urlToHost(nodes[0].Address))
+	containers1, err := s.p.listContainersByHost(net.URLToHost(nodes[0].Address))
 	c.Assert(err, check.IsNil)
-	containers2, err := s.p.listContainersByHost(urlToHost(nodes[1].Address))
+	containers2, err := s.p.listContainersByHost(net.URLToHost(nodes[1].Address))
 	c.Assert(err, check.IsNil)
 	c.Assert(containers1, check.HasLen, 2)
 	c.Assert(containers2, check.HasLen, 2)
@@ -810,7 +811,7 @@ func (s *AutoScaleSuite) TestAutoScaleConfigRunMemoryBasedPlanTooBig(c *check.C)
 	defer config.Unset("docker:scheduler:total-memory-metadata")
 	err := app.PlanRemove("default")
 	c.Assert(err, check.IsNil)
-	plan := app.Plan{Memory: 126000, Name: "default", CpuShare: 10}
+	plan := app.Plan{Memory: 25165824, Name: "default", CpuShare: 10}
 	err = plan.Save()
 	c.Assert(err, check.IsNil)
 	originalNodes, err := s.p.cluster.Nodes()
@@ -828,7 +829,7 @@ func (s *AutoScaleSuite) TestAutoScaleConfigRunMemoryBasedPlanTooBig(c *check.C)
 		GroupByMetadata: "pool",
 	}
 	a.runOnce()
-	c.Assert(s.S.logBuf, check.Matches, `(?s).*\[node autoscale\] error scaling group pool1: aborting, impossible to fit max plan memory of 126000 bytes, node max available memory is 100000.*`)
+	c.Assert(s.S.logBuf, check.Matches, `(?s).*\[node autoscale\] error scaling group pool1: aborting, impossible to fit max plan memory of 25165824 bytes, node max available memory is 20132659.*`)
 	nodes, err := s.p.cluster.Nodes()
 	c.Assert(err, check.IsNil)
 	c.Assert(nodes, check.HasLen, 1)
@@ -844,7 +845,7 @@ func (s *AutoScaleSuite) TestAutoScaleConfigRunScaleDown(c *check.C) {
 	node := cluster.Node{Address: otherUrl, Metadata: map[string]string{
 		"pool":     "pool1",
 		"iaas":     "my-scale-iaas",
-		"totalMem": "125000",
+		"totalMem": "25165824",
 	}}
 	err := s.p.cluster.Register(node)
 	c.Assert(err, check.IsNil)
@@ -883,7 +884,7 @@ func (s *AutoScaleSuite) TestAutoScaleConfigRunScaleDown(c *check.C) {
 	nodes, err := s.p.cluster.Nodes()
 	c.Assert(err, check.IsNil)
 	c.Assert(nodes, check.HasLen, 1)
-	containers, err := s.p.listContainersByHost(urlToHost(nodes[0].Address))
+	containers, err := s.p.listContainersByHost(net.URLToHost(nodes[0].Address))
 	c.Assert(err, check.IsNil)
 	c.Assert(containers, check.HasLen, 2)
 }
@@ -893,13 +894,13 @@ func (s *AutoScaleSuite) TestAutoScaleConfigRunScaleDownMultipleNodes(c *check.C
 	node1 := cluster.Node{Address: fmt.Sprintf("http://localhost:%d/", dockertest.URLPort(s.node2.URL())), Metadata: map[string]string{
 		"pool":     "pool1",
 		"iaas":     "my-scale-iaas",
-		"totalMem": "125000",
+		"totalMem": "25165824",
 	}}
 	err := s.p.cluster.Register(node1)
 	node2 := cluster.Node{Address: fmt.Sprintf("http://[::1]:%d/", dockertest.URLPort(s.node3.URL())), Metadata: map[string]string{
 		"pool":     "pool1",
 		"iaas":     "my-scale-iaas",
-		"totalMem": "125000",
+		"totalMem": "25165824",
 	}}
 	err = s.p.cluster.Register(node2)
 	c.Assert(err, check.IsNil)
@@ -947,7 +948,7 @@ func (s *AutoScaleSuite) TestAutoScaleConfigRunScaleDownMultipleNodes(c *check.C
 	nodes, err := s.p.cluster.Nodes()
 	c.Assert(err, check.IsNil)
 	c.Assert(nodes, check.HasLen, 1)
-	containers, err := s.p.listContainersByHost(urlToHost(nodes[0].Address))
+	containers, err := s.p.listContainersByHost(net.URLToHost(nodes[0].Address))
 	c.Assert(err, check.IsNil)
 	c.Assert(containers, check.HasLen, 3)
 }
@@ -962,7 +963,7 @@ func (s *AutoScaleSuite) TestAutoScaleConfigRunScaleDownMemoryScaler(c *check.C)
 	node := cluster.Node{Address: otherUrl, Metadata: map[string]string{
 		"pool":     "pool1",
 		"iaas":     "my-scale-iaas",
-		"totalMem": "125000",
+		"totalMem": "25165824",
 	}}
 	err := s.p.cluster.Register(node)
 	c.Assert(err, check.IsNil)
@@ -1001,7 +1002,7 @@ func (s *AutoScaleSuite) TestAutoScaleConfigRunScaleDownMemoryScaler(c *check.C)
 	nodes, err := s.p.cluster.Nodes()
 	c.Assert(err, check.IsNil)
 	c.Assert(nodes, check.HasLen, 1)
-	containers, err := s.p.listContainersByHost(urlToHost(nodes[0].Address))
+	containers, err := s.p.listContainersByHost(net.URLToHost(nodes[0].Address))
 	c.Assert(err, check.IsNil)
 	c.Assert(containers, check.HasLen, 2)
 }
@@ -1015,13 +1016,13 @@ func (s *AutoScaleSuite) TestAutoScaleConfigRunScaleDownMemoryScalerMultipleNode
 	node1 := cluster.Node{Address: fmt.Sprintf("http://localhost:%d/", dockertest.URLPort(s.node2.URL())), Metadata: map[string]string{
 		"pool":     "pool1",
 		"iaas":     "my-scale-iaas",
-		"totalMem": "125000",
+		"totalMem": "25165824",
 	}}
 	err := s.p.cluster.Register(node1)
 	node2 := cluster.Node{Address: fmt.Sprintf("http://[::1]:%d/", dockertest.URLPort(s.node3.URL())), Metadata: map[string]string{
 		"pool":     "pool1",
 		"iaas":     "my-scale-iaas",
-		"totalMem": "125000",
+		"totalMem": "25165824",
 	}}
 	err = s.p.cluster.Register(node2)
 	c.Assert(err, check.IsNil)
@@ -1069,7 +1070,7 @@ func (s *AutoScaleSuite) TestAutoScaleConfigRunScaleDownMemoryScalerMultipleNode
 	nodes, err := s.p.cluster.Nodes()
 	c.Assert(err, check.IsNil)
 	c.Assert(nodes, check.HasLen, 1)
-	containers, err := s.p.listContainersByHost(urlToHost(nodes[0].Address))
+	containers, err := s.p.listContainersByHost(net.URLToHost(nodes[0].Address))
 	c.Assert(err, check.IsNil)
 	c.Assert(containers, check.HasLen, 3)
 }
@@ -1193,7 +1194,7 @@ func (s *AutoScaleSuite) TestAutoScaleConfigRunOnceRulesPerPool(c *check.C) {
 	node := cluster.Node{Address: otherUrl, Metadata: map[string]string{
 		"pool":     "pool2",
 		"iaas":     "my-scale-iaas",
-		"totalMem": "125000",
+		"totalMem": "25165824",
 	}}
 	err := s.p.cluster.Register(node)
 	c.Assert(err, check.IsNil)
@@ -1224,7 +1225,7 @@ func (s *AutoScaleSuite) TestAutoScaleConfigRunOnceRulesPerPool(c *check.C) {
 	appStruct := &app.App{
 		Name: appInstance2.GetName(),
 		Pool: "pool2",
-		Plan: app.Plan{Memory: 21000},
+		Plan: app.Plan{Memory: 4194304},
 	}
 	err = s.S.storage.Apps().Insert(appStruct)
 	c.Assert(err, check.IsNil)
@@ -1278,7 +1279,7 @@ func (s *AutoScaleSuite) TestAutoScaleConfigRunOnceRulesPerPool(c *check.C) {
 	reasons := []string{evts[0].Reason, evts[1].Reason}
 	sort.Strings(reasons)
 	c.Assert(reasons, check.DeepEquals, []string{
-		"can't add 21000 bytes to an existing node, adding 1 nodes",
+		"can't add 4194304 bytes to an existing node, adding 1 nodes",
 		"number of free slots is -2, adding 1 nodes",
 	})
 }

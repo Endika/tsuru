@@ -158,6 +158,14 @@ func (s *Storage) Quota() *storage.Collection {
 	return c
 }
 
+// SAMLRequests returns the saml_requests from MongoDB.
+func (s *Storage) SAMLRequests() *storage.Collection {
+	id := mgo.Index{Key: []string{"id"}}
+	coll := s.Collection("saml_requests")
+	coll.EnsureIndex(id)
+	return coll
+}
+
 var logCappedInfo = mgo.CollectionInfo{
 	Capped:       true,
 	MaxBytes:     200 * 5000,
@@ -198,4 +206,12 @@ func (s *LogStorage) LogsCollections() ([]*storage.Collection, error) {
 
 func (s *Storage) Roles() *storage.Collection {
 	return s.Collection("roles")
+}
+
+func (s *Storage) ScopedConfig() *storage.Collection {
+	// This collection has this name for historical reasons. At first it was
+	// used exclusively by the bs component, later it became a generic
+	// configuration collection. Preserving the old name allow updating tsuru
+	// without the need for data migrations.
+	return s.Collection("bsconfig")
 }

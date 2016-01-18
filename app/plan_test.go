@@ -1,4 +1,4 @@
-// Copyright 2015 tsuru authors. All rights reserved.
+// Copyright 2016 tsuru authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -56,21 +56,29 @@ func (s *S) TestPlanAddInvalid(c *check.C) {
 			CpuShare: 100,
 		},
 		{
-			Name:   "plan1",
-			Memory: 9223372036854775807,
-			Swap:   1024,
+			Name:     "plan1",
+			Memory:   9223372036854775807,
+			Swap:     1024,
+			CpuShare: 1,
 		},
 		{
 			Name:     "plan1",
-			Memory:   1024,
+			Memory:   9223372036854775807,
 			Swap:     1024,
 			CpuShare: 100,
 			Router:   "invalid",
 		},
+		{
+			Name:     "plan1",
+			Memory:   4,
+			Swap:     1024,
+			CpuShare: 100,
+		},
 	}
-	for _, p := range invalidPlans {
+	expectedError := []error{PlanValidationError{"name"}, ErrLimitOfCpuShare, PlanValidationError{"router"}, ErrLimitOfMemory}
+	for i, p := range invalidPlans {
 		err := p.Save()
-		c.Assert(err, check.FitsTypeOf, PlanValidationError{})
+		c.Assert(err, check.FitsTypeOf, expectedError[i])
 	}
 }
 

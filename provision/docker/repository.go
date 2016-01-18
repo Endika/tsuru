@@ -1,4 +1,4 @@
-// Copyright 2015 tsuru authors. All rights reserved.
+// Copyright 2016 tsuru authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -7,9 +7,9 @@ package docker
 import (
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/tsuru/docker-cluster/cluster"
+	"github.com/tsuru/tsuru/net"
 	"github.com/tsuru/tsuru/provision"
 	"github.com/tsuru/tsuru/provision/docker/container"
 	"gopkg.in/mgo.v2/bson"
@@ -21,14 +21,14 @@ func (p *dockerProvisioner) GetContainer(id string) (*container.Container, error
 	var containers []container.Container
 	coll := p.Collection()
 	defer coll.Close()
-	id = fmt.Sprintf("^%s.*", id)
-	err := coll.Find(bson.M{"id": bson.RegEx{Pattern: id}}).All(&containers)
+	pattern := fmt.Sprintf("^%s.*", id)
+	err := coll.Find(bson.M{"id": bson.RegEx{Pattern: pattern}}).All(&containers)
 	if err != nil {
 		return nil, err
 	}
 	lenContainers := len(containers)
 	if lenContainers == 0 {
-		return nil, provision.ErrUnitNotFound
+		return nil, &provision.UnitNotFoundError{ID: id}
 	}
 	if lenContainers > 1 {
 		return nil, errAmbiguousContainer
@@ -46,7 +46,7 @@ func (p *dockerProvisioner) GetContainerByName(name string) (*container.Containe
 	}
 	lenContainers := len(containers)
 	if lenContainers == 0 {
-		return nil, provision.ErrUnitNotFound
+		return nil, &provision.UnitNotFoundError{ID: name}
 	}
 	if lenContainers > 1 {
 		return nil, errAmbiguousContainer
@@ -116,7 +116,7 @@ func (p *dockerProvisioner) listAppsForNodes(nodes []*cluster.Node) ([]string, e
 	defer coll.Close()
 	nodeNames := make([]string, len(nodes))
 	for i, n := range nodes {
-		nodeNames[i] = urlToHost(n.Address)
+		nodeNames[i] = net.URLToHost(n.Address)
 	}
 	var appNames []string
 	err := coll.Find(bson.M{"hostaddr": bson.M{"$in": nodeNames}}).Distinct("appname", &appNames)
@@ -153,13 +153,4 @@ func (p *dockerProvisioner) getContainerCountForAppName(appName string) (int, er
 	coll := p.Collection()
 	defer coll.Close()
 	return coll.Find(bson.M{"appname": appName}).Count()
-}
-
-func (p *dockerProvisioner) listUnresponsiveContainers(maxUnresponsiveTime time.Duration) ([]container.Container, error) {
-	now := time.Now().UTC()
-	return p.ListContainers(bson.M{
-		"lastsuccessstatusupdate": bson.M{"$lt": now.Add(-maxUnresponsiveTime)},
-		"hostport":                bson.M{"$ne": ""},
-		"status":                  bson.M{"$ne": provision.StatusStopped.String()},
-	})
 }

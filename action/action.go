@@ -69,7 +69,7 @@ type Action struct {
 	// Minimum number of parameters that this action requires to run.
 	MinParams int
 
-	// Function taht will be invoked after some failure occurured in the
+	// Function that will be invoked after some failure occurured in the
 	// Forward phase of this same action.
 	OnError OnErrorFunc
 
@@ -93,8 +93,13 @@ func NewPipeline(actions ...*Action) *Pipeline {
 	// guarantees each copy has an isolated Result.
 	newActions := make([]*Action, len(actions))
 	for i, action := range actions {
-		newAction := new(Action)
-		*newAction = *action
+		newAction := &Action{
+			Name:      action.Name,
+			Forward:   action.Forward,
+			Backward:  action.Backward,
+			MinParams: action.MinParams,
+			OnError:   action.OnError,
+		}
 		newActions[i] = newAction
 	}
 	return &Pipeline{actions: newActions}

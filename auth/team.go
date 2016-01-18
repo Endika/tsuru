@@ -12,6 +12,7 @@ import (
 
 	"github.com/tsuru/tsuru/db"
 	"github.com/tsuru/tsuru/log"
+	"github.com/tsuru/tsuru/permission"
 	"gopkg.in/mgo.v2"
 	"gopkg.in/mgo.v2/bson"
 )
@@ -36,50 +37,10 @@ func (e *ErrTeamStillUsed) Error() string {
 	return fmt.Sprintf("Service instances: %s", strings.Join(e.ServiceInstances, ", "))
 }
 
-// Team represents a real world team, a team has team members (users) and
-// a name.
+// Team represents a real world team, a team has one creating user and a name.
 type Team struct {
-	Name  string   `bson:"_id" json:"name"`
-	Users []string `json:"users"`
-}
-
-// ContainsUser checks if the team contains the user.
-func (t *Team) ContainsUser(u *User) bool {
-	for _, user := range t.Users {
-		if u.Email == user {
-			return true
-		}
-	}
-	return false
-}
-
-// AddUser adds a user to the team.
-func (t *Team) AddUser(u *User) error {
-	if t.ContainsUser(u) {
-		return fmt.Errorf("User %s is already in the team %s.", u.Email, t.Name)
-	}
-	t.Users = append(t.Users, u.Email)
-	return nil
-}
-
-// RemoveUser removes a user from the team.
-func (t *Team) RemoveUser(u *User) error {
-	index := -1
-	for i, user := range t.Users {
-		if u.Email == user {
-			index = i
-			break
-		}
-	}
-	if index < 0 {
-		return fmt.Errorf("User %s is not in the team %s.", u.Email, t.Name)
-	}
-	last := len(t.Users) - 1
-	if index < last {
-		t.Users[index] = t.Users[last]
-	}
-	t.Users = t.Users[:last]
-	return nil
+	Name         string `bson:"_id" json:"name"`
+	CreatingUser string
 }
 
 // AllowedApps returns the apps that the team has access.
@@ -102,17 +63,17 @@ func (t *Team) AllowedApps() ([]string, error) {
 }
 
 // CreateTeam creates a team and add users to this team.
-func CreateTeam(name string, user ...*User) error {
+func CreateTeam(name string, user *User) error {
+	if user == nil {
+		return errors.New("user cannot be null")
+	}
 	name = strings.TrimSpace(name)
 	if !isTeamNameValid(name) {
 		return ErrInvalidTeamName
 	}
 	team := Team{
-		Name:  name,
-		Users: make([]string, len(user)),
-	}
-	for i, u := range user {
-		team.Users[i] = u.Email
+		Name:         name,
+		CreatingUser: user.Email,
 	}
 	conn, err := db.Conn()
 	if err != nil {
@@ -123,7 +84,14 @@ func CreateTeam(name string, user ...*User) error {
 	if mgo.IsDup(err) {
 		return ErrTeamAlreadyExists
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	err = user.AddRolesForEvent(permission.RoleEventTeamCreate, name)
+	if err != nil {
+		log.Errorf("unable to add default roles during team %q creation for %q: %s", name, user.Email, err)
+	}
+	return nil
 }
 
 func isTeamNameValid(name string) bool {
@@ -155,29 +123,6 @@ func GetTeamsNames(teams []Team) []string {
 		tn[i] = t.Name
 	}
 	return tn
-}
-
-// CheckUserAccess verifies if the user has access to a list
-// of teams.
-func CheckUserAccess(teamNames []string, u *User) bool {
-	if u.IsAdmin() {
-		return true
-	}
-	q := bson.M{"_id": bson.M{"$in": teamNames}}
-	var teams []Team
-	conn, err := db.Conn()
-	if err != nil {
-		log.Errorf("Failed to connect to the database: %s", err)
-		return false
-	}
-	defer conn.Close()
-	conn.Teams().Find(q).All(&teams)
-	for _, team := range teams {
-		if team.ContainsUser(u) {
-			return true
-		}
-	}
-	return false
 }
 
 func RemoveTeam(teamName string) error {

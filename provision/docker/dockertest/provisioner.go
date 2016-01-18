@@ -1,4 +1,4 @@
-// Copyright 2015 tsuru authors. All rights reserved.
+// Copyright 2016 tsuru authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -7,8 +7,6 @@ package dockertest
 import (
 	"fmt"
 	"io"
-	"net"
-	"net/url"
 	"strings"
 	"sync"
 
@@ -17,6 +15,7 @@ import (
 	"github.com/tsuru/docker-cluster/cluster"
 	"github.com/tsuru/tsuru/db"
 	"github.com/tsuru/tsuru/db/storage"
+	"github.com/tsuru/tsuru/net"
 	"github.com/tsuru/tsuru/provision"
 	"github.com/tsuru/tsuru/provision/docker/container"
 	"gopkg.in/mgo.v2/bson"
@@ -270,20 +269,29 @@ func (p *FakeDockerProvisioner) PrepareListResult(containers []container.Contain
 	if err != nil {
 		p.preparedErrors <- err
 	} else if len(containers) > 0 {
-		p.preparedResults <- containers
+		coll := p.Collection()
+		defer coll.Close()
+		for _, c := range containers {
+			coll.Insert(c)
+		}
 	}
 }
 
 func (p *FakeDockerProvisioner) ListContainers(query bson.M) ([]container.Container, error) {
 	p.queries = append(p.queries, query)
 	select {
-	case containers := <-p.preparedResults:
-		return containers, nil
 	case err := <-p.preparedErrors:
 		return nil, err
 	default:
 	}
-	return nil, nil
+	coll := p.Collection()
+	defer coll.Close()
+	var containers []container.Container
+	err := coll.Find(query).All(&containers)
+	if err != nil {
+		return nil, err
+	}
+	return containers, nil
 }
 
 func (p *FakeDockerProvisioner) Queries() []bson.M {
@@ -315,7 +323,7 @@ func (p *FakeDockerProvisioner) StartContainers(args StartContainersArgs) ([]con
 			Image: args.Image,
 		},
 	}
-	hostAddr := urlToHost(args.Endpoint)
+	hostAddr := net.URLToHost(args.Endpoint)
 	createdContainers := make([]container.Container, 0, len(args.Amount))
 	for processName, amount := range args.Amount {
 		opts.Config.Cmd = []string{processName}
@@ -354,16 +362,4 @@ func (p *FakeDockerProvisioner) findContainer(id string) (container.Container, i
 		}
 	}
 	return container.Container{}, -1, &docker.NoSuchContainer{ID: id}
-}
-
-func urlToHost(urlStr string) string {
-	url, _ := url.Parse(urlStr)
-	if url == nil || url.Host == "" {
-		return urlStr
-	}
-	host, _, _ := net.SplitHostPort(url.Host)
-	if host == "" {
-		return url.Host
-	}
-	return host
 }

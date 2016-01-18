@@ -1,4 +1,4 @@
-// Copyright 2015 tsuru authors. All rights reserved.
+// Copyright 2016 tsuru authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -45,6 +45,7 @@ type FakeApp struct {
 	bindCalls      []*provision.Unit
 	bindLock       sync.Mutex
 	instances      map[string][]bind.ServiceInstance
+	instancesLock  sync.Mutex
 	Pool           string
 	UpdatePlatform bool
 	TeamOwner      string
@@ -141,24 +142,30 @@ func (a *FakeApp) SetQuotaInUse(inUse int) error {
 }
 
 func (a *FakeApp) GetInstances(serviceName string) []bind.ServiceInstance {
+	a.instancesLock.Lock()
+	defer a.instancesLock.Unlock()
 	return a.instances[serviceName]
 }
 
-func (a *FakeApp) AddInstance(serviceName string, instance bind.ServiceInstance, w io.Writer) error {
-	instances := a.instances[serviceName]
-	instances = append(instances, instance)
-	a.instances[serviceName] = instances
+func (a *FakeApp) AddInstance(instanceApp bind.InstanceApp, w io.Writer) error {
+	a.instancesLock.Lock()
+	defer a.instancesLock.Unlock()
+	instances := a.instances[instanceApp.ServiceName]
+	instances = append(instances, instanceApp.Instance)
+	a.instances[instanceApp.ServiceName] = instances
 	if w != nil {
 		w.Write([]byte("add instance"))
 	}
 	return nil
 }
 
-func (a *FakeApp) RemoveInstance(serviceName string, instance bind.ServiceInstance, w io.Writer) error {
-	instances := a.instances[serviceName]
+func (a *FakeApp) RemoveInstance(instanceApp bind.InstanceApp, w io.Writer) error {
+	a.instancesLock.Lock()
+	defer a.instancesLock.Unlock()
+	instances := a.instances[instanceApp.ServiceName]
 	index := -1
 	for i, inst := range instances {
-		if inst.Name == instance.Name {
+		if inst.Name == instanceApp.Instance.Name {
 			index = i
 			break
 		}
@@ -169,7 +176,7 @@ func (a *FakeApp) RemoveInstance(serviceName string, instance bind.ServiceInstan
 	for i := index; i < len(instances)-1; i++ {
 		instances[i] = instances[i+1]
 	}
-	a.instances[serviceName] = instances[:len(instances)-1]
+	a.instances[instanceApp.ServiceName] = instances[:len(instances)-1]
 	if w != nil {
 		w.Write([]byte("remove instance"))
 	}
@@ -240,15 +247,15 @@ func (a *FakeApp) SetEnv(env bind.EnvVar) {
 	a.env[env.Name] = env
 }
 
-func (a *FakeApp) SetEnvs(envs []bind.EnvVar, publicOnly bool, w io.Writer) error {
-	for _, env := range envs {
+func (a *FakeApp) SetEnvs(setEnvs bind.SetEnvApp, w io.Writer) error {
+	for _, env := range setEnvs.Envs {
 		a.SetEnv(env)
 	}
 	return nil
 }
 
-func (a *FakeApp) UnsetEnvs(envs []string, publicOnly bool, w io.Writer) error {
-	for _, env := range envs {
+func (a *FakeApp) UnsetEnvs(unsetEnvs bind.UnsetEnvApp, w io.Writer) error {
+	for _, env := range unsetEnvs.VariableNames {
 		delete(a.env, env)
 	}
 	return nil
@@ -289,8 +296,15 @@ func (a *FakeApp) Run(cmd string, w io.Writer, once bool) error {
 	return nil
 }
 
-func (app *FakeApp) GetUpdatePlatform() bool {
-	return app.UpdatePlatform
+func (a *FakeApp) GetUpdatePlatform() bool {
+	return a.UpdatePlatform
+}
+
+func (a *FakeApp) SetUpdatePlatform(check bool) error {
+	a.commMut.Lock()
+	a.UpdatePlatform = check
+	a.commMut.Unlock()
+	return nil
 }
 
 func (app *FakeApp) GetRouter() (string, error) {
@@ -421,13 +435,6 @@ func (p *FakeProvisioner) GetUnits(app provision.App) []provision.Unit {
 	return pApp.units
 }
 
-// Version returns the last deployed for a given app.
-func (p *FakeProvisioner) Version(app provision.App) string {
-	p.mut.RLock()
-	defer p.mut.RUnlock()
-	return p.apps[app.GetName()].version
-}
-
 // PrepareOutput sends the given slice of bytes to a queue of outputs.
 //
 // Each prepared output will be used in the ExecuteCommand. It might be sent to
@@ -478,22 +485,6 @@ func (p *FakeProvisioner) Swap(app1, app2 provision.App) error {
 	return routertest.FakeRouter.Swap(app1.GetName(), app2.GetName())
 }
 
-func (p *FakeProvisioner) GitDeploy(app provision.App, version string, w io.Writer) (string, error) {
-	if err := p.getError("GitDeploy"); err != nil {
-		return "", err
-	}
-	p.mut.Lock()
-	defer p.mut.Unlock()
-	pApp, ok := p.apps[app.GetName()]
-	if !ok {
-		return "", errNotProvisioned
-	}
-	w.Write([]byte("Git deploy called"))
-	pApp.version = version
-	p.apps[app.GetName()] = pApp
-	return "app-image", nil
-}
-
 func (p *FakeProvisioner) ArchiveDeploy(app provision.App, archiveURL string, w io.Writer) (string, error) {
 	if err := p.getError("ArchiveDeploy"); err != nil {
 		return "", err
@@ -537,6 +528,21 @@ func (p *FakeProvisioner) ImageDeploy(app provision.App, img string, w io.Writer
 		return "", errNotProvisioned
 	}
 	w.Write([]byte("Image deploy called"))
+	p.apps[app.GetName()] = pApp
+	return img, nil
+}
+
+func (p *FakeProvisioner) Rollback(app provision.App, img string, w io.Writer) (string, error) {
+	if err := p.getError("ImageDeploy"); err != nil {
+		return "", err
+	}
+	p.mut.Lock()
+	defer p.mut.Unlock()
+	pApp, ok := p.apps[app.GetName()]
+	if !ok {
+		return "", errNotProvisioned
+	}
+	w.Write([]byte("Rollback deploy called"))
 	p.apps[app.GetName()] = pApp
 	return img, nil
 }
@@ -821,7 +827,7 @@ func (p *FakeProvisioner) SetUnitStatus(unit provision.Unit, status provision.St
 		}
 	}
 	if index < 0 {
-		return provision.ErrUnitNotFound
+		return &provision.UnitNotFoundError{ID: unit.ID}
 	}
 	app := p.apps[unit.AppName]
 	app.units[index].Status = status
@@ -1016,24 +1022,24 @@ func (p *ExtensibleFakeProvisioner) getPlatform(name string) (int, *provisionedP
 	return -1, nil
 }
 
-func (p *ExtensibleFakeProvisioner) PlatformAdd(name string, args map[string]string, w io.Writer) error {
+func (p *ExtensibleFakeProvisioner) PlatformAdd(opts provision.PlatformOptions) error {
 	if err := p.getError("PlatformAdd"); err != nil {
 		return err
 	}
-	if p.GetPlatform(name) != nil {
+	if p.GetPlatform(opts.Name) != nil {
 		return errors.New("duplicate platform")
 	}
-	p.platforms = append(p.platforms, provisionedPlatform{Name: name, Args: args, Version: 1})
+	p.platforms = append(p.platforms, provisionedPlatform{Name: opts.Name, Args: opts.Args, Version: 1})
 	return nil
 }
 
-func (p *ExtensibleFakeProvisioner) PlatformUpdate(name string, args map[string]string, w io.Writer) error {
-	index, platform := p.getPlatform(name)
+func (p *ExtensibleFakeProvisioner) PlatformUpdate(opts provision.PlatformOptions) error {
+	index, platform := p.getPlatform(opts.Name)
 	if platform == nil {
 		return errors.New("platform not found")
 	}
 	platform.Version += 1
-	platform.Args = args
+	platform.Args = opts.Args
 	p.platforms[index] = *platform
 	return nil
 }
@@ -1054,7 +1060,6 @@ type provisionedApp struct {
 	restarts    map[string]int
 	starts      map[string]int
 	stops       map[string]int
-	version     string
 	lastArchive string
 	lastFile    io.ReadCloser
 	cnames      []string

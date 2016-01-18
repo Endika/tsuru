@@ -1,4 +1,4 @@
-// Copyright 2015 tsuru authors. All rights reserved.
+// Copyright 2016 tsuru authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -9,12 +9,13 @@ import (
 	"fmt"
 	"net/url"
 
-	"github.com/mailgun/vulcand/api"
-	"github.com/mailgun/vulcand/engine"
-	"github.com/mailgun/vulcand/plugin/registry"
 	"github.com/tsuru/config"
 	"github.com/tsuru/tsuru/hc"
 	"github.com/tsuru/tsuru/router"
+	"github.com/vulcand/route"
+	"github.com/vulcand/vulcand/api"
+	"github.com/vulcand/vulcand/engine"
+	"github.com/vulcand/vulcand/plugin/registry"
 )
 
 const routerName = "vulcand"
@@ -30,19 +31,19 @@ type vulcandRouter struct {
 	domain string
 }
 
-func createRouter(prefix string) (router.Router, error) {
-	vURL, err := config.GetString(prefix + ":api-url")
+func createRouter(routerName, configPrefix string) (router.Router, error) {
+	vURL, err := config.GetString(configPrefix + ":api-url")
 	if err != nil {
 		return nil, err
 	}
-	domain, err := config.GetString(prefix + ":domain")
+	domain, err := config.GetString(configPrefix + ":domain")
 	if err != nil {
 		return nil, err
 	}
 	client := api.NewClient(vURL, registry.GetRegistry())
 	vRouter := &vulcandRouter{
 		client: client,
-		prefix: prefix,
+		prefix: configPrefix,
 		domain: domain,
 	}
 	return vRouter, nil
@@ -87,6 +88,7 @@ func (r *vulcandRouter) AddBackend(name string) error {
 		return err
 	}
 	frontend, err := engine.NewHTTPFrontend(
+		route.NewMux(),
 		frontendName,
 		backend.Id,
 		fmt.Sprintf(`Host(%q)`, r.frontendHostname(name)),
@@ -123,7 +125,7 @@ func (r *vulcandRouter) RemoveBackend(name string) error {
 		}
 	}
 	for _, fk := range toRemove {
-		err := r.client.DeleteFrontend(fk)
+		err = r.client.DeleteFrontend(fk)
 		if err != nil {
 			if _, ok := err.(*engine.NotFoundError); ok {
 				return router.ErrBackendNotFound
@@ -206,6 +208,7 @@ func (r *vulcandRouter) SetCName(cname, name string) error {
 		return router.ErrCNameExists
 	}
 	frontend, err := engine.NewHTTPFrontend(
+		route.NewMux(),
 		frontendName,
 		r.backendName(usedName),
 		fmt.Sprintf(`Host(%q)`, cname),

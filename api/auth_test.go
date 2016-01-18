@@ -26,6 +26,7 @@ import (
 	"github.com/tsuru/tsuru/db"
 	"github.com/tsuru/tsuru/db/dbtest"
 	"github.com/tsuru/tsuru/errors"
+	"github.com/tsuru/tsuru/permission"
 	"github.com/tsuru/tsuru/provision"
 	"github.com/tsuru/tsuru/provision/provisiontest"
 	"github.com/tsuru/tsuru/quota"
@@ -40,13 +41,11 @@ import (
 )
 
 type AuthSuite struct {
-	team       *auth.Team
-	user       *auth.User
-	token      auth.Token
-	adminteam  *auth.Team
-	adminuser  *auth.User
-	admintoken auth.Token
-	server     *authtest.SMTPServer
+	team   *auth.Team
+	team2  *auth.Team
+	user   *auth.User
+	token  auth.Token
+	server *authtest.SMTPServer
 }
 
 var _ = check.Suite(&AuthSuite{})
@@ -69,6 +68,10 @@ func (s *AuthSuite) SetUpSuite(c *check.C) {
 
 func (s *AuthSuite) TearDownSuite(c *check.C) {
 	s.server.Stop()
+	conn, err := db.Conn()
+	c.Assert(err, check.IsNil)
+	defer conn.Close()
+	conn.Apps().Database.DropDatabase()
 }
 
 func (s *AuthSuite) SetUpTest(c *check.C) {
@@ -86,26 +89,20 @@ func (s *AuthSuite) SetUpTest(c *check.C) {
 }
 
 func (s *AuthSuite) createUserAndTeam(c *check.C) {
-	s.user = &auth.User{Email: "whydidifall@thewho.com", Password: "123456"}
-	_, err := nativeScheme.Create(s.user)
-	c.Assert(err, check.IsNil)
-	s.adminuser = &auth.User{Email: "myadmin@arrakis.com", Password: "123456"}
-	_, err = nativeScheme.Create(s.adminuser)
-	s.team = &auth.Team{Name: "tsuruteam", Users: []string{s.user.Email}}
+	s.token = customUserWithPermission(c, "super-auth-toremove", permission.Permission{
+		Scheme:  permission.PermAll,
+		Context: permission.Context(permission.CtxGlobal, ""),
+	})
+	var err error
+	s.user, err = s.token.User()
+	s.team = &auth.Team{Name: "tsuruteam"}
+	s.team2 = &auth.Team{Name: "tsuruteam2"}
 	conn, _ := db.Conn()
 	defer conn.Close()
 	err = conn.Teams().Insert(s.team)
 	c.Assert(err, check.IsNil)
-	s.token, err = nativeScheme.Login(map[string]string{"email": s.user.Email, "password": "123456"})
+	err = conn.Teams().Insert(s.team2)
 	c.Assert(err, check.IsNil)
-	s.adminteam = &auth.Team{Name: "admin", Users: []string{s.adminuser.Email}}
-	err = conn.Teams().Insert(s.adminteam)
-	c.Assert(err, check.IsNil)
-	s.token, err = nativeScheme.Login(map[string]string{"email": s.user.Email, "password": "123456"})
-	c.Assert(err, check.IsNil)
-	s.admintoken, err = nativeScheme.Login(map[string]string{"email": s.adminuser.Email, "password": "123456"})
-	c.Assert(err, check.IsNil)
-	config.Set("admin-team", s.adminteam.Name)
 }
 
 func (s *AuthSuite) getTestData(p ...string) io.ReadCloser {
@@ -114,27 +111,6 @@ func (s *AuthSuite) getTestData(p ...string) io.ReadCloser {
 	f, _ := os.OpenFile(fp, os.O_RDONLY, 0)
 	return f
 }
-
-type userPresenceChecker struct{}
-
-func (c *userPresenceChecker) Info() *check.CheckerInfo {
-	return &check.CheckerInfo{Name: "ContainsUser", Params: []string{"team", "user"}}
-}
-
-func (c *userPresenceChecker) Check(params []interface{}, names []string) (bool, string) {
-	team, ok := params[0].(*auth.Team)
-	if !ok {
-		return false, "first parameter should be a pointer to a team instance"
-	}
-
-	user, ok := params[1].(*auth.User)
-	if !ok {
-		return false, "second parameter should be a pointer to a user instance"
-	}
-	return team.ContainsUser(user), ""
-}
-
-var ContainsUser check.Checker = &userPresenceChecker{}
 
 func (s *AuthSuite) TestCreateUserHandlerSavesTheUserInTheDatabase(c *check.C) {
 	b := bytes.NewBufferString(`{"email":"nobody@globo.com","password":"123456"}`)
@@ -322,7 +298,7 @@ func (s *AuthSuite) TestCreateUserWorksWithRegistrationDisabledAndAdminUser(c *c
 	request, err := http.NewRequest("POST", "/users", b)
 	c.Assert(err, check.IsNil)
 	request.Header.Set("Content-type", "application/json")
-	request.Header.Set("Authorization", "bearer "+s.admintoken.GetValue())
+	request.Header.Set("Authorization", "bearer "+s.token.GetValue())
 	oldUserRegistration, err := config.GetBool("auth:user-registration")
 	c.Assert(err, check.IsNil)
 	config.Set("auth:user-registration", false)
@@ -372,36 +348,6 @@ func (s *AuthSuite) TestLoginShouldCreateTokenInTheDatabaseAndReturnItWithinTheR
 		User:   u.Email,
 	}
 	c.Assert(action, rectest.IsRecorded)
-}
-
-func (s *AuthSuite) TestLoginShouldInformWhenUserIsNotAdmin(c *check.C) {
-	b := bytes.NewBufferString(`{"password":"123456"}`)
-	request, err := http.NewRequest("POST", "/users/whydidifall@thewho.com/tokens", b)
-	c.Assert(err, check.IsNil)
-	request.Header.Set("Content-type", "application/json")
-	recorder := httptest.NewRecorder()
-	m := RunServer(true)
-	m.ServeHTTP(recorder, request)
-	c.Assert(recorder.Code, check.Equals, http.StatusOK)
-	var recorderJSON map[string]interface{}
-	r, _ := ioutil.ReadAll(recorder.Body)
-	json.Unmarshal(r, &recorderJSON)
-	c.Assert(recorderJSON["is_admin"], check.Equals, false)
-}
-
-func (s *AuthSuite) TestLoginShouldInformWhenUserIsAdmin(c *check.C) {
-	b := bytes.NewBufferString(`{"password":"123456"}`)
-	request, err := http.NewRequest("POST", "/users/myadmin@arrakis.com/tokens", b)
-	c.Assert(err, check.IsNil)
-	request.Header.Set("Content-type", "application/json")
-	recorder := httptest.NewRecorder()
-	m := RunServer(true)
-	m.ServeHTTP(recorder, request)
-	c.Assert(recorder.Code, check.Equals, http.StatusOK)
-	var recorderJSON map[string]interface{}
-	r, _ := ioutil.ReadAll(recorder.Body)
-	json.Unmarshal(r, &recorderJSON)
-	c.Assert(recorderJSON["is_admin"], check.Equals, true)
 }
 
 func (s *AuthSuite) TestLoginShouldReturnErrorAndBadRequestIfItReceivesAnInvalidJSON(c *check.C) {
@@ -538,7 +484,6 @@ func (s *AuthSuite) TestCreateTeamHandlerSavesTheTeamInTheDatabaseWithTheAuthent
 	err = conn.Teams().Find(bson.M{"_id": "timeredbull"}).One(t)
 	defer conn.Teams().Remove(bson.M{"_id": "timeredbull"})
 	c.Assert(err, check.IsNil)
-	c.Assert(t, ContainsUser, s.user)
 	action := rectest.Action{
 		Action: "create-team",
 		User:   s.user.Email,
@@ -596,7 +541,7 @@ func (s *AuthSuite) TestCreateTeamHandlerReturnConflictIfTheTeamToBeCreatedAlrea
 func (s *AuthSuite) TestRemoveTeam(c *check.C) {
 	conn, _ := db.Conn()
 	defer conn.Close()
-	team := auth.Team{Name: "painofsalvation", Users: []string{s.user.Email}}
+	team := auth.Team{Name: "painofsalvation"}
 	err := conn.Teams().Insert(team)
 	c.Assert(err, check.IsNil)
 	defer conn.Teams().Remove(bson.M{"_id": team.Name})
@@ -619,13 +564,13 @@ func (s *AuthSuite) TestRemoveTeam(c *check.C) {
 func (s *AuthSuite) TestRemoveTeamAsAdmin(c *check.C) {
 	conn, _ := db.Conn()
 	defer conn.Close()
-	team := auth.Team{Name: "thegathering", Users: []string{s.user.Email}}
+	team := auth.Team{Name: "thegathering"}
 	err := conn.Teams().Insert(team)
 	c.Assert(err, check.IsNil)
 	defer conn.Teams().Remove(bson.M{"_id": team.Name})
 	request, err := http.NewRequest("DELETE", fmt.Sprintf("/teams/%s", team.Name), nil)
 	c.Assert(err, check.IsNil)
-	request.Header.Add("Authorization", "bearer "+s.admintoken.GetValue())
+	request.Header.Add("Authorization", "bearer "+s.token.GetValue())
 	recorder := httptest.NewRecorder()
 	m := RunServer(true)
 	m.ServeHTTP(recorder, request)
@@ -635,7 +580,7 @@ func (s *AuthSuite) TestRemoveTeamAsAdmin(c *check.C) {
 	c.Assert(n, check.Equals, 0)
 	action := rectest.Action{
 		Action: "remove-team",
-		User:   s.adminuser.Email,
+		User:   s.user.Email,
 		Extra:  []interface{}{team.Name},
 	}
 	c.Assert(action, rectest.IsRecorded)
@@ -654,6 +599,10 @@ func (s *AuthSuite) TestRemoveTeamGives404WhenTeamDoesNotExist(c *check.C) {
 }
 
 func (s *AuthSuite) TestRemoveTeamGives404WhenUserDoesNotHaveAccessToTheTeam(c *check.C) {
+	token := userWithPermission(c, permission.Permission{
+		Scheme:  permission.PermTeamDelete,
+		Context: permission.Context(permission.CtxTeam, "other-team"),
+	})
 	conn, _ := db.Conn()
 	defer conn.Close()
 	team := auth.Team{Name: "painofsalvation"}
@@ -663,7 +612,7 @@ func (s *AuthSuite) TestRemoveTeamGives404WhenUserDoesNotHaveAccessToTheTeam(c *
 	request, err := http.NewRequest("DELETE", fmt.Sprintf("/teams/%s?:name=%s", team.Name, team.Name), nil)
 	c.Assert(err, check.IsNil)
 	recorder := httptest.NewRecorder()
-	err = removeTeam(recorder, request, s.token)
+	err = removeTeam(recorder, request, token)
 	c.Assert(err, check.NotNil)
 	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, check.Equals, true)
@@ -674,11 +623,11 @@ func (s *AuthSuite) TestRemoveTeamGives404WhenUserDoesNotHaveAccessToTheTeam(c *
 func (s *AuthSuite) TestRemoveTeamGives403WhenTeamHasAccessToAnyApp(c *check.C) {
 	conn, _ := db.Conn()
 	defer conn.Close()
-	team := auth.Team{Name: "evergrey", Users: []string{s.user.Email}}
+	team := auth.Team{Name: "evergrey"}
 	err := conn.Teams().Insert(team)
 	c.Assert(err, check.IsNil)
 	defer conn.Teams().Remove(bson.M{"_id": team.Name})
-	a := app.App{Name: "i-should", Platform: "python", Teams: []string{team.Name}, TeamOwner: team.Name}
+	a := app.App{Name: "i-should", Platform: "python", TeamOwner: team.Name}
 	err = app.CreateApp(&a, s.user)
 	c.Assert(err, check.IsNil)
 	defer app.Delete(&a, nil)
@@ -698,7 +647,7 @@ Apps: i-should`
 func (s *AuthSuite) TestRemoveTeamGives403WhenTeamHasAccessToAnyServiceInstance(c *check.C) {
 	conn, _ := db.Conn()
 	defer conn.Close()
-	team := auth.Team{Name: "evergrey", Users: []string{s.user.Email}}
+	team := auth.Team{Name: "evergrey"}
 	err := conn.Teams().Insert(team)
 	c.Assert(err, check.IsNil)
 	defer conn.Teams().Remove(bson.M{"_id": team.Name})
@@ -721,10 +670,14 @@ Service instances: my_nosql, my_nosql-2`
 	c.Assert(e.Message, check.Equals, expected)
 }
 
-func (s *AuthSuite) TestListTeamsListsAllTeamsThatTheUserIsMember(c *check.C) {
+func (s *AuthSuite) TestListTeamsListsAllTeamsThatTheUserHasAccess(c *check.C) {
+	token := userWithPermission(c, permission.Permission{
+		Scheme:  permission.PermAppCreate,
+		Context: permission.Context(permission.CtxTeam, s.team.Name),
+	})
 	request, err := http.NewRequest("GET", "/teams", nil)
 	c.Assert(err, check.IsNil)
-	request.Header.Set("Authorization", "bearer "+s.token.GetValue())
+	request.Header.Set("Authorization", "bearer "+token.GetValue())
 	recorder := httptest.NewRecorder()
 	mux := RunServer(true)
 	mux.ServeHTTP(recorder, request)
@@ -734,20 +687,54 @@ func (s *AuthSuite) TestListTeamsListsAllTeamsThatTheUserIsMember(c *check.C) {
 	var m []map[string]interface{}
 	err = json.Unmarshal(b, &m)
 	c.Assert(err, check.IsNil)
-	c.Assert(m, check.DeepEquals, []map[string]interface{}{
-		{"name": s.team.Name, "member": true},
+	c.Assert(m, check.HasLen, 1)
+	c.Assert(m[0]["name"], check.Equals, s.team.Name)
+	c.Assert(m[0]["permissions"], check.DeepEquals, []interface{}{
+		"app.create",
 	})
 	action := rectest.Action{
 		Action: "list-teams",
-		User:   s.user.Email,
+		User:   token.GetUserName(),
 	}
 	c.Assert(action, rectest.IsRecorded)
 }
 
-func (s *AuthSuite) TestListTeamsWithAdminUser(c *check.C) {
+func (s *AuthSuite) TestListTeamsListsShowOnlyParents(c *check.C) {
+	token := userWithPermission(c, permission.Permission{
+		Scheme:  permission.PermAppCreate,
+		Context: permission.Context(permission.CtxTeam, s.team.Name),
+	}, permission.Permission{
+		Scheme:  permission.PermApp,
+		Context: permission.Context(permission.CtxTeam, s.team.Name),
+	})
 	request, err := http.NewRequest("GET", "/teams", nil)
 	c.Assert(err, check.IsNil)
-	request.Header.Set("Authorization", "bearer "+s.admintoken.GetValue())
+	request.Header.Set("Authorization", "bearer "+token.GetValue())
+	recorder := httptest.NewRecorder()
+	mux := RunServer(true)
+	mux.ServeHTTP(recorder, request)
+	c.Assert(recorder.Header().Get("Content-Type"), check.Equals, "application/json")
+	b, err := ioutil.ReadAll(recorder.Body)
+	c.Assert(err, check.IsNil)
+	var m []map[string]interface{}
+	err = json.Unmarshal(b, &m)
+	c.Assert(err, check.IsNil)
+	c.Assert(m, check.HasLen, 1)
+	c.Assert(m[0]["name"], check.Equals, s.team.Name)
+	c.Assert(m[0]["permissions"], check.DeepEquals, []interface{}{
+		"app",
+	})
+	action := rectest.Action{
+		Action: "list-teams",
+		User:   token.GetUserName(),
+	}
+	c.Assert(action, rectest.IsRecorded)
+}
+
+func (s *AuthSuite) TestListTeamsWithAllPoweredUser(c *check.C) {
+	request, err := http.NewRequest("GET", "/teams", nil)
+	c.Assert(err, check.IsNil)
+	request.Header.Set("Authorization", "bearer "+s.token.GetValue())
 	recorder := httptest.NewRecorder()
 	mux := RunServer(true)
 	mux.ServeHTTP(recorder, request)
@@ -758,13 +745,13 @@ func (s *AuthSuite) TestListTeamsWithAdminUser(c *check.C) {
 	var m []map[string]interface{}
 	err = json.Unmarshal(b, &m)
 	c.Assert(err, check.IsNil)
-	c.Assert(m, check.DeepEquals, []map[string]interface{}{
-		{"name": s.team.Name, "member": false},
-		{"name": s.adminteam.Name, "member": true},
-	})
+	c.Assert(m, check.HasLen, 2)
+	names := []string{m[0]["name"].(string), m[1]["name"].(string)}
+	sort.Strings(names)
+	c.Assert(names, check.DeepEquals, []string{s.team.Name, s.team2.Name})
 	action := rectest.Action{
 		Action: "list-teams",
-		User:   s.adminuser.Email,
+		User:   s.user.Email,
 	}
 	c.Assert(action, rectest.IsRecorded)
 }
@@ -785,362 +772,6 @@ func (s *AuthSuite) TestListTeamsReturns204IfTheUserHasNoTeam(c *check.C) {
 	err = teamList(recorder, request, token)
 	c.Assert(err, check.IsNil)
 	c.Assert(recorder.Code, check.Equals, http.StatusNoContent)
-}
-
-func (s *AuthSuite) TestAddUserToTeam(c *check.C) {
-	conn, _ := db.Conn()
-	defer conn.Close()
-	u := &auth.User{Email: "wolverine@xmen.com", Password: "123456"}
-	_, err := nativeScheme.Create(u)
-	c.Assert(err, check.IsNil)
-	url := "/teams/tsuruteam/wolverine@xmen.com?:team=tsuruteam&:user=wolverine@xmen.com"
-	request, err := http.NewRequest("PUT", url, nil)
-	c.Assert(err, check.IsNil)
-	recorder := httptest.NewRecorder()
-	err = addUserToTeam(recorder, request, s.token)
-	c.Assert(err, check.IsNil)
-	t := new(auth.Team)
-	err = conn.Teams().Find(bson.M{"_id": "tsuruteam"}).One(t)
-	c.Assert(err, check.IsNil)
-	c.Assert(t, ContainsUser, s.user)
-	c.Assert(t, ContainsUser, u)
-	action := rectest.Action{
-		Action: "add-user-to-team",
-		User:   s.user.Email,
-		Extra:  []interface{}{"team=tsuruteam", "user=" + u.Email},
-	}
-	c.Assert(action, rectest.IsRecorded)
-}
-
-func (s *AuthSuite) TestAddUserToTeamShouldReturnNotFoundIfThereIsNoTeamWithTheGivenName(c *check.C) {
-	request, err := http.NewRequest("PUT", "/teams/abc/me@me.me?:team=abc&:user=me@me.me", nil)
-	c.Assert(err, check.IsNil)
-	recorder := httptest.NewRecorder()
-	err = addUserToTeam(recorder, request, s.token)
-	c.Assert(err, check.NotNil)
-	e, ok := err.(*errors.HTTP)
-	c.Assert(ok, check.Equals, true)
-	c.Assert(e.Code, check.Equals, http.StatusNotFound)
-	c.Assert(e, check.ErrorMatches, "^Team not found$")
-}
-
-func (s *AuthSuite) TestAddUserToTeamShouldReturnForbiddenIfTheGivenUserIsNotInTheGivenTeam(c *check.C) {
-	u := &auth.User{Email: "hi@me.me", Password: "123456"}
-	_, err := nativeScheme.Create(u)
-	c.Assert(err, check.IsNil)
-	token, err := nativeScheme.Login(map[string]string{"email": u.Email, "password": "123456"})
-	c.Assert(err, check.IsNil)
-	conn, _ := db.Conn()
-	defer conn.Close()
-	defer conn.Users().Remove(bson.M{"email": u.Email})
-	defer conn.Tokens().Remove(bson.M{"token": token.GetValue()})
-	request, err := http.NewRequest("PUT", "/teams/tsuruteam/hi@me.me?:team=tsuruteam&:user=hi@me.me", nil)
-	c.Assert(err, check.IsNil)
-	recorder := httptest.NewRecorder()
-	err = addUserToTeam(recorder, request, token)
-	c.Assert(err, check.NotNil)
-	e, ok := err.(*errors.HTTP)
-	c.Assert(ok, check.Equals, true)
-	c.Assert(e.Code, check.Equals, http.StatusForbidden)
-	c.Assert(e, check.ErrorMatches, "^You are not authorized to add new users to the team tsuruteam$")
-}
-
-func (s *AuthSuite) TestAddUserToTeamShouldReturnNotFoundIfTheEmailInTheBodyDoesNotExistInTheDatabase(c *check.C) {
-	request, err := http.NewRequest("PUT", "/teams/tsuruteam/hi2@me.me?:team=tsuruteam&:user=hi2@me.me", nil)
-	c.Assert(err, check.IsNil)
-	recorder := httptest.NewRecorder()
-	err = addUserToTeam(recorder, request, s.token)
-	c.Assert(err, check.NotNil)
-	e, ok := err.(*errors.HTTP)
-	c.Assert(ok, check.Equals, true)
-	c.Assert(e.Code, check.Equals, http.StatusNotFound)
-	c.Assert(e, check.ErrorMatches, "^User not found$")
-}
-
-func (s *AuthSuite) TestAddUserToTeamShouldReturnConflictIfTheUserIsAlreadyInTheGroup(c *check.C) {
-	url := fmt.Sprintf("/teams/%s/%s?:team=%s&:user=%s", s.team.Name, s.user.Email, s.team.Name, s.user.Email)
-	request, err := http.NewRequest("PUT", url, nil)
-	c.Assert(err, check.IsNil)
-	recorder := httptest.NewRecorder()
-	err = addUserToTeam(recorder, request, s.token)
-	c.Assert(err, check.NotNil)
-	e, ok := err.(*errors.HTTP)
-	c.Assert(ok, check.Equals, true)
-	c.Assert(e.Code, check.Equals, http.StatusConflict)
-}
-
-func (s *AuthSuite) TestAddUserToTeamShoulGrantAccessInRepository(c *check.C) {
-	u := &auth.User{Email: "marathon@rush.com", Password: "123456"}
-	_, err := nativeScheme.Create(u)
-	c.Assert(err, check.IsNil)
-	t, err := nativeScheme.Login(map[string]string{"email": u.Email, "password": "123456"})
-	c.Assert(err, check.IsNil)
-	defer nativeScheme.Logout(t.GetValue())
-	conn, _ := db.Conn()
-	defer conn.Close()
-	defer conn.Users().Remove(bson.M{"email": u.Email})
-	a := app.App{Name: "i-should", Platform: "python", Teams: []string{s.team.Name}}
-	err = app.CreateApp(&a, s.user)
-	c.Assert(err, check.IsNil)
-	defer app.Delete(&a, nil)
-	b := bytes.NewBufferString(`{"name":"the-key","key":"my-key"}`)
-	request, err := http.NewRequest("POST", "/users/keys", b)
-	c.Assert(err, check.IsNil)
-	recorder := httptest.NewRecorder()
-	err = addKeyToUser(recorder, request, t)
-	c.Assert(err, check.IsNil)
-	url := fmt.Sprintf("/teams/%s/%s?:team=%s&:user=%s", s.team.Name, u.Email, s.team.Name, u.Email)
-	request, err = http.NewRequest("PUT", url, nil)
-	c.Assert(err, check.IsNil)
-	recorder = httptest.NewRecorder()
-	err = addUserToTeam(recorder, request, s.token)
-	c.Assert(err, check.IsNil)
-	grants, err := repositorytest.Granted(a.Name)
-	c.Assert(err, check.IsNil)
-	c.Assert(grants, check.DeepEquals, []string{s.user.Email, "marathon@rush.com"})
-}
-
-func (s *AuthSuite) TestAddUserToTeamInDatabase(c *check.C) {
-	user := &auth.User{Email: "nobody@gmail.com", Password: "123456"}
-	team := &auth.Team{Name: "myteam"}
-	conn, _ := db.Conn()
-	defer conn.Close()
-	err := conn.Teams().Insert(team)
-	c.Assert(err, check.IsNil)
-	defer conn.Teams().RemoveId(team.Name)
-	err = addUserToTeamInDatabase(user, team)
-	c.Assert(err, check.IsNil)
-	conn.Teams().FindId(team.Name).One(team)
-	c.Assert(team.Users, check.DeepEquals, []string{user.Email})
-}
-
-func (s *AuthSuite) TestRemoveUserFromTeamShouldRemoveAUserFromATeamIfTheTeamExistAndTheUserIsMemberOfTheTeam(c *check.C) {
-	u := auth.User{Email: "nonee@me.me"}
-	err := u.Create()
-	c.Assert(err, check.IsNil)
-	conn, _ := db.Conn()
-	defer conn.Close()
-	defer conn.Users().Remove(bson.M{"email": u.Email})
-	s.team.AddUser(&u)
-	conn.Teams().Update(bson.M{"_id": s.team.Name}, s.team)
-	request, err := http.NewRequest("DELETE", "/teams/tsuruteam/nonee@me.me?:team=tsuruteam&:user=nonee@me.me", nil)
-	c.Assert(err, check.IsNil)
-	recorder := httptest.NewRecorder()
-	err = removeUserFromTeam(recorder, request, s.token)
-	c.Assert(err, check.IsNil)
-	err = conn.Teams().Find(bson.M{"_id": s.team.Name}).One(s.team)
-	c.Assert(err, check.IsNil)
-	c.Assert(s.team, check.Not(ContainsUser), &u)
-	action := rectest.Action{
-		Action: "remove-user-from-team",
-		User:   s.user.Email,
-		Extra:  []interface{}{"team=tsuruteam", "user=" + u.Email},
-	}
-	c.Assert(action, rectest.IsRecorded)
-}
-
-func (s *AuthSuite) TestRemoveUserFromTeamShouldRemoveOnlyAppsInThatTeamInRepositoryWhenUserIsInMoreThanOneTeam(c *check.C) {
-	conn, _ := db.Conn()
-	defer conn.Close()
-	u := auth.User{Email: "nobody@me.me"}
-	err := u.Create()
-	c.Assert(err, check.IsNil)
-	defer conn.Users().Remove(bson.M{"email": u.Email})
-	s.team.AddUser(&u)
-	conn.Teams().UpdateId(s.team.Name, s.team)
-	team2 := auth.Team{Name: "team2", Users: []string{u.Email}}
-	err = conn.Teams().Insert(&team2)
-	c.Assert(err, check.IsNil)
-	defer conn.Teams().RemoveId(team2.Name)
-	app1 := app.App{Name: "app1", Platform: "python", Teams: []string{s.team.Name}}
-	err = app.CreateApp(&app1, s.user)
-	c.Assert(err, check.IsNil)
-	defer app.Delete(&app1, nil)
-	app2 := app.App{Name: "app2", Platform: "python", Teams: []string{s.team.Name, team2.Name}}
-	err = app.CreateApp(&app2, s.user)
-	c.Assert(err, check.IsNil)
-	defer app.Delete(&app2, nil)
-	url := fmt.Sprintf("/teams/%s/%s?:team=%s&:user=%s", s.team.Name, u.Email, s.team.Name, u.Email)
-	request, err := http.NewRequest("DELETE", url, nil)
-	c.Assert(err, check.IsNil)
-	recorder := httptest.NewRecorder()
-	err = removeUserFromTeam(recorder, request, s.token)
-	c.Assert(err, check.IsNil)
-	grants, err := repositorytest.Granted("app1")
-	c.Assert(err, check.IsNil)
-	c.Assert(grants, check.DeepEquals, []string{s.user.Email})
-}
-
-func (s *AuthSuite) TestRemoveUserFromTeamShouldReturnNotFoundIfTheTeamDoesNotExist(c *check.C) {
-	request, err := http.NewRequest("DELETE", "/teams/tsuruteam/none@me.me?:team=unknown&:user=none@me.me", nil)
-	c.Assert(err, check.IsNil)
-	recorder := httptest.NewRecorder()
-	err = removeUserFromTeam(recorder, request, s.token)
-	c.Assert(err, check.NotNil)
-	e, ok := err.(*errors.HTTP)
-	c.Assert(ok, check.Equals, true)
-	c.Assert(e.Code, check.Equals, http.StatusNotFound)
-	c.Assert(e, check.ErrorMatches, "^Team not found$")
-}
-
-func (s *AuthSuite) TestRemoveUserFromTeamShouldReturnUnauthorizedIfTheGivenUserIsNotMemberOfTheTeam(c *check.C) {
-	request, err := http.NewRequest("DELETE", "/teams/tsuruteam/none@me.me?:team=tsuruteam&:user=none@me.me", nil)
-	c.Assert(err, check.IsNil)
-	u := &auth.User{Email: "unknown@gmail.com", Password: "123456"}
-	_, err = nativeScheme.Create(u)
-	token, err := nativeScheme.Login(map[string]string{"email": u.Email, "password": "123456"})
-	c.Assert(err, check.IsNil)
-	conn, _ := db.Conn()
-	defer conn.Close()
-	defer conn.Users().Remove(bson.M{"email": u.Email})
-	defer conn.Tokens().Remove(bson.M{"token": token.GetValue()})
-	recorder := httptest.NewRecorder()
-	err = removeUserFromTeam(recorder, request, token)
-	c.Assert(err, check.NotNil)
-	e, ok := err.(*errors.HTTP)
-	c.Assert(ok, check.Equals, true)
-	c.Assert(e.Code, check.Equals, http.StatusUnauthorized)
-	c.Assert(e, check.ErrorMatches, "^You are not authorized to remove a member from the team tsuruteam")
-}
-
-func (s *AuthSuite) TestRemoveUserFromTeamShouldReturnNotFoundWhenTheUserIsNotMemberOfTheTeam(c *check.C) {
-	conn, _ := db.Conn()
-	defer conn.Close()
-	u := &auth.User{Email: "nobody@me.me", Password: "132"}
-	s.team.AddUser(u)
-	conn.Teams().Update(bson.M{"_id": s.team.Name}, s.team)
-	defer func(t *auth.Team, u *auth.User) {
-		s.team.RemoveUser(u)
-		conn.Teams().Update(bson.M{"_id": t.Name}, t)
-	}(s.team, u)
-	request, err := http.NewRequest("DELETE", "/teams/tsuruteam/none@me.me?:team=tsuruteam&:user=none@me.me", nil)
-	c.Assert(err, check.IsNil)
-	recorder := httptest.NewRecorder()
-	err = removeUserFromTeam(recorder, request, s.token)
-	c.Assert(err, check.NotNil)
-	e, ok := err.(*errors.HTTP)
-	c.Assert(ok, check.Equals, true)
-	c.Assert(e.Code, check.Equals, http.StatusNotFound)
-}
-
-func (s *AuthSuite) TestRemoveUserFromTeamShouldReturnForbiddenIfTheUserIsTheLastInTheTeam(c *check.C) {
-	url := "/teams/tsuruteam/whydidifall@thewho.com?:team=tsuruteam&:user=whydidifall@thewho.com"
-	request, err := http.NewRequest("DELETE", url, nil)
-	c.Assert(err, check.IsNil)
-	recorder := httptest.NewRecorder()
-	err = removeUserFromTeam(recorder, request, s.token)
-	c.Assert(err, check.NotNil)
-	e, ok := err.(*errors.HTTP)
-	c.Assert(ok, check.Equals, true)
-	c.Assert(e.Code, check.Equals, http.StatusForbidden)
-	c.Assert(e, check.ErrorMatches, "^You can not remove this user from this team, because it is the last user within the team, and a team can not be orphaned$")
-}
-
-func (s *AuthSuite) TestRemoveUserFromTeamRevokesAccessInRepository(c *check.C) {
-	conn, _ := db.Conn()
-	defer conn.Close()
-	u := &auth.User{Email: "pomar@nando-reis.com", Password: "123456"}
-	_, err := nativeScheme.Create(u)
-	c.Assert(err, check.IsNil)
-	t, err := nativeScheme.Login(map[string]string{"email": u.Email, "password": "123456"})
-	c.Assert(err, check.IsNil)
-	defer nativeScheme.Logout(t.GetValue())
-	defer conn.Users().Remove(bson.M{"email": u.Email})
-	b := bytes.NewBufferString(`{"name":"the-key","key":"my-key"}`)
-	request, err := http.NewRequest("POST", "/users/keys", b)
-	c.Assert(err, check.IsNil)
-	recorder := httptest.NewRecorder()
-	err = addKeyToUser(recorder, request, t)
-	c.Assert(err, check.IsNil)
-	url := fmt.Sprintf("/teams/%s/%s?:team=%s&:user=%s", s.team.Name, u.Email, s.team.Name, u.Email)
-	request, err = http.NewRequest("PUT", url, nil)
-	c.Assert(err, check.IsNil)
-	recorder = httptest.NewRecorder()
-	err = addUserToTeam(recorder, request, s.token)
-	c.Assert(err, check.IsNil)
-	a := app.App{Name: "myapp", Platform: "python", Teams: []string{s.team.Name}}
-	err = app.CreateApp(&a, s.user)
-	c.Assert(err, check.IsNil)
-	defer app.Delete(&a, nil)
-	url = fmt.Sprintf("/teams/%s/%s?:team=%s&:user=%s", s.team.Name, u.Email, s.team.Name, u.Email)
-	request, err = http.NewRequest("DELETE", url, nil)
-	c.Assert(err, check.IsNil)
-	recorder = httptest.NewRecorder()
-	err = removeUserFromTeam(recorder, request, s.token)
-	c.Assert(err, check.IsNil)
-	grants, err := repositorytest.Granted("myapp")
-	c.Assert(err, check.IsNil)
-	c.Assert(grants, check.DeepEquals, []string{s.user.Email})
-}
-
-func (s *AuthSuite) TestRemoveUserFromTeamInDatabase(c *check.C) {
-	conn, _ := db.Conn()
-	defer conn.Close()
-	u := &auth.User{Email: "nobody@gmail.com"}
-	err := u.Create()
-	c.Assert(err, check.IsNil)
-	s.team.AddUser(u)
-	err = conn.Teams().UpdateId(s.team.Name, s.team)
-	c.Assert(err, check.IsNil)
-	err = removeUserFromTeamInDatabase(u, s.team)
-	c.Assert(err, check.IsNil)
-	err = conn.Teams().FindId(s.team.Name).One(s.team)
-	c.Assert(err, check.IsNil)
-	c.Assert(s.team, check.Not(ContainsUser), u)
-}
-
-func (s *AuthSuite) TestGetTeam(c *check.C) {
-	team, err := auth.GetTeam(s.team.Name)
-	c.Assert(err, check.IsNil)
-	url := fmt.Sprintf("/teams/%s?:name=%s", team.Name, team.Name)
-	request, err := http.NewRequest("GET", url, nil)
-	c.Assert(err, check.IsNil)
-	recorder := httptest.NewRecorder()
-	err = getTeam(recorder, request, s.token)
-	c.Assert(err, check.IsNil)
-	c.Assert(recorder.Header().Get("Content-Type"), check.Equals, "application/json")
-	var got auth.Team
-	err = json.NewDecoder(recorder.Body).Decode(&got)
-	c.Assert(err, check.IsNil)
-	c.Assert(got, check.DeepEquals, *team)
-	action := rectest.Action{
-		User:   s.user.Email,
-		Action: "get-team",
-		Extra:  []interface{}{team.Name},
-	}
-	c.Assert(action, rectest.IsRecorded)
-}
-
-func (s *AuthSuite) TestGetTeamNotFound(c *check.C) {
-	url := "/teams/unknown?:name=unknown"
-	request, err := http.NewRequest("GET", url, nil)
-	c.Assert(err, check.IsNil)
-	recorder := httptest.NewRecorder()
-	err = getTeam(recorder, request, s.token)
-	c.Assert(err, check.NotNil)
-	e, ok := err.(*errors.HTTP)
-	c.Assert(ok, check.Equals, true)
-	c.Assert(e.Code, check.Equals, http.StatusNotFound)
-	c.Assert(e.Message, check.Equals, "Team not found")
-}
-
-func (s *AuthSuite) TestGetTeamForbidden(c *check.C) {
-	conn, err := db.Conn()
-	c.Assert(err, check.IsNil)
-	defer conn.Close()
-	team := auth.Team{Name: "paradisum", Users: []string{"someuser@me.com"}}
-	conn.Teams().Insert(team)
-	defer conn.Teams().RemoveId(team.Name)
-	url := fmt.Sprintf("/teams/%s?:name=%s", team.Name, team.Name)
-	request, err := http.NewRequest("GET", url, nil)
-	c.Assert(err, check.IsNil)
-	recorder := httptest.NewRecorder()
-	err = getTeam(recorder, request, s.token)
-	c.Assert(err, check.NotNil)
-	e, ok := err.(*errors.HTTP)
-	c.Assert(ok, check.Equals, true)
-	c.Assert(e.Code, check.Equals, http.StatusForbidden)
-	c.Assert(e.Message, check.Equals, "User is not member of this team")
 }
 
 func (s *AuthSuite) TestAddKeyToUser(c *check.C) {
@@ -1458,7 +1089,32 @@ func (s *AuthSuite) TestRemoveUser(c *check.C) {
 	c.Assert(action, rectest.IsRecorded)
 	users := repositorytest.Users()
 	sort.Strings(users)
-	c.Assert(users, check.DeepEquals, []string{"myadmin@arrakis.com", "whydidifall@thewho.com"})
+	c.Assert(users, check.DeepEquals, []string{s.user.Email})
+}
+
+func (s *AuthSuite) TestRemoveUserProvidingOwnEmail(c *check.C) {
+	conn, _ := db.Conn()
+	defer conn.Close()
+	u := auth.User{Email: "her-voices@painofsalvation.com", Password: "123456"}
+	_, err := nativeScheme.Create(&u)
+	c.Assert(err, check.IsNil)
+	defer conn.Users().Remove(bson.M{"email": u.Email})
+	token, err := nativeScheme.Login(map[string]string{"email": u.Email, "password": "123456"})
+	c.Assert(err, check.IsNil)
+	defer conn.Tokens().Remove(bson.M{"token": token.GetValue()})
+	request, err := http.NewRequest("DELETE", "/users?user="+u.Email, nil)
+	c.Assert(err, check.IsNil)
+	recorder := httptest.NewRecorder()
+	err = removeUser(recorder, request, token)
+	c.Assert(err, check.IsNil)
+	n, err := conn.Users().Find(bson.M{"email": u.Email}).Count()
+	c.Assert(err, check.IsNil)
+	c.Assert(n, check.Equals, 0)
+	action := rectest.Action{Action: "remove-user", User: u.Email}
+	c.Assert(action, rectest.IsRecorded)
+	users := repositorytest.Users()
+	sort.Strings(users)
+	c.Assert(users, check.DeepEquals, []string{s.user.Email})
 }
 
 func (s *AuthSuite) TestRemoveAnotherUser(c *check.C) {
@@ -1470,7 +1126,7 @@ func (s *AuthSuite) TestRemoveAnotherUser(c *check.C) {
 	defer conn.Users().Remove(bson.M{"email": u.Email})
 	request, err := http.NewRequest("DELETE", "/users?user="+u.Email, nil)
 	c.Assert(err, check.IsNil)
-	request.Header.Set("Authorization", "bearer "+s.admintoken.GetValue())
+	request.Header.Set("Authorization", "bearer "+s.token.GetValue())
 	recorder := httptest.NewRecorder()
 	m := RunServer(true)
 	m.ServeHTTP(recorder, request)
@@ -1482,19 +1138,14 @@ func (s *AuthSuite) TestRemoveAnotherUser(c *check.C) {
 	c.Assert(action, rectest.IsRecorded)
 	users := repositorytest.Users()
 	sort.Strings(users)
-	c.Assert(users, check.DeepEquals, []string{"myadmin@arrakis.com", "whydidifall@thewho.com"})
+	c.Assert(users, check.DeepEquals, []string{s.user.Email})
 }
 
-func (s *AuthSuite) TestRemoveAnotherUserNonAdmin(c *check.C) {
-	conn, _ := db.Conn()
-	defer conn.Close()
+func (s *AuthSuite) TestRemoveAnotherUserNoPermission(c *check.C) {
+	token := userWithPermission(c)
 	u := auth.User{Email: "her-voices@painofsalvation.com", Password: "123456"}
 	_, err := nativeScheme.Create(&u)
 	c.Assert(err, check.IsNil)
-	defer conn.Users().Remove(bson.M{"email": u.Email})
-	token, err := nativeScheme.Login(map[string]string{"email": u.Email, "password": "123456"})
-	c.Assert(err, check.IsNil)
-	defer conn.Tokens().Remove(bson.M{"token": token.GetValue()})
 	request, err := http.NewRequest("DELETE", "/users?user="+s.user.Email, nil)
 	c.Assert(err, check.IsNil)
 	recorder := httptest.NewRecorder()
@@ -1503,73 +1154,6 @@ func (s *AuthSuite) TestRemoveAnotherUserNonAdmin(c *check.C) {
 	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, check.Equals, true)
 	c.Assert(e.Code, check.Equals, http.StatusForbidden)
-	c.Assert(e.Message, check.Equals, "you're not allowed to remove this user")
-}
-
-func (s *AuthSuite) TestRemoveUserNonSpecifiedUserAdmin(c *check.C) {
-	conn, _ := db.Conn()
-	defer conn.Close()
-	request, err := http.NewRequest("DELETE", "/users", nil)
-	c.Assert(err, check.IsNil)
-	request.Header.Set("Authorization", "bearer "+s.admintoken.GetValue())
-	recorder := httptest.NewRecorder()
-	m := RunServer(true)
-	m.ServeHTTP(recorder, request)
-	c.Assert(recorder.Code, check.Equals, http.StatusBadRequest)
-	c.Assert(recorder.Body.String(), check.Equals, "please specify the user you want to remove\n")
-}
-
-func (s *AuthSuite) TestRemoveUserWithTheUserBeingLastMemberOfATeam(c *check.C) {
-	conn, _ := db.Conn()
-	defer conn.Close()
-	u := auth.User{Email: "of-two-beginnings@painofsalvation.com", Password: "123456"}
-	_, err := nativeScheme.Create(&u)
-	c.Assert(err, check.IsNil)
-	defer conn.Users().Remove(bson.M{"email": u.Email})
-	token, err := nativeScheme.Login(map[string]string{"email": u.Email, "password": "123456"})
-	c.Assert(err, check.IsNil)
-	defer conn.Tokens().Remove(bson.M{"token": token.GetValue()})
-	t := auth.Team{Name: "painofsalvation", Users: []string{u.Email}}
-	err = conn.Teams().Insert(t)
-	c.Assert(err, check.IsNil)
-	defer conn.Teams().Remove(bson.M{"_id": t.Name})
-	request, err := http.NewRequest("DELETE", "/users", nil)
-	c.Assert(err, check.IsNil)
-	recorder := httptest.NewRecorder()
-	err = removeUser(recorder, request, token)
-	c.Assert(err, check.NotNil)
-	e, ok := err.(*errors.HTTP)
-	c.Assert(ok, check.Equals, true)
-	c.Assert(e.Code, check.Equals, http.StatusForbidden)
-	expected := `This user is the last member of the team "painofsalvation", so it cannot be removed.
-
-Please remove the team, then remove the user.`
-	c.Assert(e.Message, check.Equals, expected)
-}
-
-func (s *AuthSuite) TestRemoveUserShouldRemoveTheUserFromAllTeamsThatHeIsMember(c *check.C) {
-	conn, _ := db.Conn()
-	defer conn.Close()
-	u := auth.User{Email: "of-two-beginnings@painofsalvation.com", Password: "123456"}
-	_, err := nativeScheme.Create(&u)
-	c.Assert(err, check.IsNil)
-	defer conn.Users().Remove(bson.M{"email": u.Email})
-	token, err := nativeScheme.Login(map[string]string{"email": u.Email, "password": "123456"})
-	c.Assert(err, check.IsNil)
-	defer conn.Tokens().Remove(bson.M{"token": token.GetValue()})
-	t := auth.Team{Name: "painofsalvation", Users: []string{u.Email, s.user.Email}}
-	err = conn.Teams().Insert(t)
-	c.Assert(err, check.IsNil)
-	defer conn.Teams().Remove(bson.M{"_id": t.Name})
-	request, err := http.NewRequest("DELETE", "/users", nil)
-	c.Assert(err, check.IsNil)
-	recorder := httptest.NewRecorder()
-	err = removeUser(recorder, request, token)
-	c.Assert(err, check.IsNil)
-	err = conn.Teams().Find(bson.M{"_id": t.Name}).One(&t)
-	c.Assert(err, check.IsNil)
-	c.Assert(t.Users, check.HasLen, 1)
-	c.Assert(t.Users[0], check.Equals, s.user.Email)
 }
 
 func (s *AuthSuite) TestChangePasswordHandler(c *check.C) {
@@ -1815,6 +1399,47 @@ func (s *AuthSuite) TestRegenerateAPITokenHandler(c *check.C) {
 	c.Assert(count, check.Equals, 1)
 }
 
+func (s *AuthSuite) TestRegenerateAPITokenHandlerOtherUserAndIsAdminUser(c *check.C) {
+	conn, _ := db.Conn()
+	defer conn.Close()
+	u := auth.User{Email: "user@example.com", Password: "123456"}
+	_, err := nativeScheme.Create(&u)
+	c.Assert(err, check.IsNil)
+	defer conn.Users().Remove(bson.M{"email": u.Email})
+	token := s.token
+	c.Assert(err, check.IsNil)
+	defer conn.Tokens().Remove(bson.M{"token": token.GetValue()})
+	request, err := http.NewRequest("POST", "/users/api-key?user=user@example.com", nil)
+	c.Assert(err, check.IsNil)
+	recorder := httptest.NewRecorder()
+	err = regenerateAPIToken(recorder, request, token)
+	c.Assert(err, check.IsNil)
+	var got string
+	err = json.NewDecoder(recorder.Body).Decode(&got)
+	c.Assert(err, check.IsNil)
+	count, err := conn.Users().Find(bson.M{"apikey": got}).Count()
+	c.Assert(err, check.IsNil)
+	c.Assert(count, check.Equals, 1)
+}
+
+func (s *AuthSuite) TestRegenerateAPITokenHandlerOtherUserAndNotAdminUser(c *check.C) {
+	conn, _ := db.Conn()
+	defer conn.Close()
+	u := auth.User{Email: "user@example.com", Password: "123456"}
+	_, err := nativeScheme.Create(&u)
+	c.Assert(err, check.IsNil)
+	defer conn.Users().Remove(bson.M{"email": u.Email})
+	token, err := nativeScheme.Login(map[string]string{"email": u.Email, "password": "123456"})
+	c.Assert(err, check.IsNil)
+	defer conn.Tokens().Remove(bson.M{"token": token.GetValue()})
+	request, err := http.NewRequest("POST", "/users/api-key?user=myadmin@arrakis.com", nil)
+	c.Assert(err, check.IsNil)
+	recorder := httptest.NewRecorder()
+	err = regenerateAPIToken(recorder, request, token)
+	c.Assert(err, check.NotNil)
+	c.Assert(err.(*errors.HTTP).Code, check.Equals, http.StatusForbidden)
+}
+
 func (s *AuthSuite) TestShowAPITokenForUserWithNoToken(c *check.C) {
 	conn, _ := db.Conn()
 	defer conn.Close()
@@ -1859,10 +1484,67 @@ func (s *AuthSuite) TestShowAPITokenForUserWithToken(c *check.C) {
 	c.Assert(got, check.Equals, "238hd23ubd923hd923j9d23ndibde")
 }
 
+func (s *AuthSuite) TestShowAPITokenOtherUserAndIsAdminUser(c *check.C) {
+	conn, _ := db.Conn()
+	defer conn.Close()
+	user := auth.User{
+		Email:    "user@example.com",
+		Password: "123456",
+		APIKey:   "334hd23ubd923hd923j9d23ndibdf",
+	}
+	_, err := nativeScheme.Create(&user)
+	c.Assert(err, check.IsNil)
+	defer conn.Users().Remove(bson.M{"email": user.Email})
+	token := s.token
+	defer conn.Tokens().Remove(bson.M{"token": token.GetValue()})
+	request, err := http.NewRequest("GET", "/users/api-key?user=user@example.com", nil)
+	c.Assert(err, check.IsNil)
+	recorder := httptest.NewRecorder()
+	err = showAPIToken(recorder, request, token)
+	c.Assert(err, check.IsNil)
+	var got string
+	err = json.NewDecoder(recorder.Body).Decode(&got)
+	c.Assert(err, check.IsNil)
+	c.Assert(got, check.Equals, "334hd23ubd923hd923j9d23ndibdf")
+}
+
+func (s *AuthSuite) TestShowAPITokenOtherUserWithoutPermission(c *check.C) {
+	conn, _ := db.Conn()
+	defer conn.Close()
+	users := []auth.User{
+		{
+			Email:    "user1@example.com",
+			Password: "123456",
+			APIKey:   "238hd23ubd923hd923j9d23ndibde",
+		},
+		{
+			Email:    "user2@example.com",
+			Password: "123456",
+			APIKey:   "334hd23ubd923hd923j9d23ndibdf",
+		},
+	}
+	for _, u := range users {
+		_, err := nativeScheme.Create(&u)
+		c.Assert(err, check.IsNil)
+		defer conn.Users().Remove(bson.M{"email": u.Email})
+	}
+	token := userWithPermission(c)
+	request, err := http.NewRequest("GET", "/users/api-key?user=user@example.com", nil)
+	c.Assert(err, check.IsNil)
+	recorder := httptest.NewRecorder()
+	err = showAPIToken(recorder, request, token)
+	c.Assert(err, check.NotNil)
+	c.Assert(err.(*errors.HTTP).Code, check.Equals, http.StatusForbidden)
+}
+
 func (s *AuthSuite) TestListUsers(c *check.C) {
+	token := userWithPermission(c, permission.Permission{
+		Scheme:  permission.PermAppCreate,
+		Context: permission.Context(permission.CtxTeam, s.team.Name),
+	})
 	request, err := http.NewRequest("GET", "/users", nil)
 	c.Assert(err, check.IsNil)
-	request.Header.Add("Authorization", "bearer "+s.admintoken.GetValue())
+	request.Header.Add("Authorization", "bearer "+s.token.GetValue())
 	recorder := httptest.NewRecorder()
 	m := RunServer(true)
 	m.ServeHTTP(recorder, request)
@@ -1872,16 +1554,85 @@ func (s *AuthSuite) TestListUsers(c *check.C) {
 	c.Assert(err, check.IsNil)
 	c.Assert(len(users), check.Equals, 2)
 	emails := []string{users[0].Email, users[1].Email}
+	expected := []string{token.GetUserName(), s.token.GetUserName()}
 	sort.Strings(emails)
-	c.Assert(emails, check.DeepEquals, []string{s.adminuser.Email, s.user.Email})
+	sort.Strings(expected)
+	c.Assert(emails, check.DeepEquals, expected)
+}
+
+func (s *AuthSuite) TestListUsersLimitedUser(c *check.C) {
+	token := userWithPermission(c, permission.Permission{
+		Scheme:  permission.PermAppCreate,
+		Context: permission.Context(permission.CtxTeam, s.team.Name),
+	})
+	request, err := http.NewRequest("GET", "/users", nil)
+	c.Assert(err, check.IsNil)
+	request.Header.Add("Authorization", "bearer "+token.GetValue())
+	recorder := httptest.NewRecorder()
+	m := RunServer(true)
+	m.ServeHTTP(recorder, request)
+	c.Assert(recorder.Code, check.Equals, http.StatusOK)
+	var users []apiUser
+	err = json.NewDecoder(recorder.Body).Decode(&users)
+	c.Assert(err, check.IsNil)
+	c.Assert(len(users), check.Equals, 1)
+	c.Assert(users[0].Email, check.Equals, token.GetUserName())
 }
 
 func (s *AuthSuite) TestUserInfo(c *check.C) {
+	request, err := http.NewRequest("GET", "/users/info", nil)
+	c.Assert(err, check.IsNil)
+	request.Header.Add("Authorization", "bearer "+s.token.GetValue())
+	recorder := httptest.NewRecorder()
+	handler := RunServer(true)
+	handler.ServeHTTP(recorder, request)
+	c.Assert(recorder.Code, check.Equals, http.StatusOK)
+	c.Assert(recorder.Header().Get("Content-Type"), check.Equals, "application/json")
+	expected := apiUser{
+		Email: s.user.Email,
+		Roles: []rolePermissionData{
+			{
+				Name:         "super-auth-toremove",
+				ContextType:  "global",
+				ContextValue: "",
+			},
+		},
+		Permissions: []rolePermissionData{
+			{
+				Name:         "",
+				ContextType:  "global",
+				ContextValue: "",
+			},
+		},
+	}
+	var got apiUser
+	err = json.NewDecoder(recorder.Body).Decode(&got)
+	c.Assert(err, check.IsNil)
+	c.Assert(got, check.DeepEquals, expected)
+}
+
+type rolePermList []rolePermissionData
+
+func (l rolePermList) Len() int      { return len(l) }
+func (l rolePermList) Swap(i, j int) { l[i], l[j] = l[j], l[i] }
+func (l rolePermList) Less(i, j int) bool {
+	return l[i].Name+l[i].ContextValue < l[j].Name+l[j].ContextValue
+}
+
+func (s *AuthSuite) TestUserInfoWithRoles(c *check.C) {
 	conn, _ := db.Conn()
 	defer conn.Close()
-	token, err := nativeScheme.Login(map[string]string{"email": s.user.Email, "password": "123456"})
+	token := userWithPermission(c)
+	r, err := permission.NewRole("myrole", "team")
 	c.Assert(err, check.IsNil)
-	defer conn.Tokens().Remove(bson.M{"token": token.GetValue()})
+	err = r.AddPermissions("app.create", "app.deploy")
+	c.Assert(err, check.IsNil)
+	u, err := token.User()
+	c.Assert(err, check.IsNil)
+	err = u.AddRole("myrole", "a")
+	c.Assert(err, check.IsNil)
+	err = u.AddRole("myrole", "b")
+	c.Assert(err, check.IsNil)
 	request, err := http.NewRequest("GET", "/users/info", nil)
 	c.Assert(err, check.IsNil)
 	request.Header.Add("Authorization", "bearer "+token.GetValue())
@@ -1890,9 +1641,65 @@ func (s *AuthSuite) TestUserInfo(c *check.C) {
 	handler.ServeHTTP(recorder, request)
 	c.Assert(recorder.Code, check.Equals, http.StatusOK)
 	c.Assert(recorder.Header().Get("Content-Type"), check.Equals, "application/json")
-	expected := apiUser{Email: s.user.Email, Teams: []string{s.team.Name}}
+	expected := apiUser{
+		Email: u.Email,
+		Roles: []rolePermissionData{
+			{Name: "myrole", ContextType: "team", ContextValue: "a"},
+			{Name: "myrole", ContextType: "team", ContextValue: "b"},
+		},
+		Permissions: []rolePermissionData{
+			{Name: "app.create", ContextType: "team", ContextValue: "a"},
+			{Name: "app.create", ContextType: "team", ContextValue: "b"},
+			{Name: "app.deploy", ContextType: "team", ContextValue: "a"},
+			{Name: "app.deploy", ContextType: "team", ContextValue: "b"},
+		},
+	}
 	var got apiUser
 	err = json.NewDecoder(recorder.Body).Decode(&got)
 	c.Assert(err, check.IsNil)
+	sort.Sort(rolePermList(got.Permissions))
+	sort.Sort(rolePermList(got.Roles))
 	c.Assert(got, check.DeepEquals, expected)
+}
+
+func (s *AuthSuite) BenchmarkListUsersManyUsers(c *check.C) {
+	c.StopTimer()
+	perm := permission.Permission{
+		Scheme:  permission.PermAppCreate,
+		Context: permission.Context(permission.CtxTeam, s.team.Name),
+	}
+	expectedNames := []string{}
+	nUsers := 100
+	for i := 0; i < nUsers; i++ {
+		email := fmt.Sprintf("user-%d", i)
+		expectedNames = append(expectedNames, email+"@groundcontrol.com")
+		t := customUserWithPermission(c, email, perm)
+		u, err := t.User()
+		c.Assert(err, check.IsNil)
+		err = u.AddRole(u.Roles[0].Name, "someothervalue")
+		c.Assert(err, check.IsNil)
+	}
+	request, err := http.NewRequest("GET", "/users", nil)
+	c.Assert(err, check.IsNil)
+	request.Header.Add("Authorization", "bearer "+s.token.GetValue())
+	recorder := httptest.NewRecorder()
+	m := RunServer(true)
+	c.StartTimer()
+	for i := 0; i < c.N; i++ {
+		m.ServeHTTP(recorder, request)
+	}
+	c.StopTimer()
+	c.Assert(recorder.Code, check.Equals, http.StatusOK)
+	var users []apiUser
+	err = json.NewDecoder(recorder.Body).Decode(&users)
+	c.Assert(err, check.IsNil)
+	c.Assert(len(users), check.Equals, nUsers+1)
+	expectedNames = append(expectedNames, s.user.Email)
+	names := []string{}
+	for _, u := range users {
+		names = append(names, u.Email)
+	}
+	sort.Strings(names)
+	sort.Strings(expectedNames)
+	c.Assert(names, check.DeepEquals, expectedNames)
 }

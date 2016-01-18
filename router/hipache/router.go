@@ -32,8 +32,8 @@ func init() {
 	hc.AddChecker("Router Hipache", router.BuildHealthCheck("hipache"))
 }
 
-func createRouter(prefix string) (router.Router, error) {
-	return &hipacheRouter{prefix: prefix}, nil
+func createRouter(routerName, configPrefix string) (router.Router, error) {
+	return &hipacheRouter{prefix: configPrefix}, nil
 }
 
 func (r *hipacheRouter) connect() redis.Conn {
@@ -169,7 +169,7 @@ func (r *hipacheRouter) AddRoute(name string, address *url.URL) error {
 		}
 	}
 	frontend := "frontend:" + backendName + "." + domain
-	if err := r.addRoute(frontend, address.String()); err != nil {
+	if err = r.addRoute(frontend, address.String()); err != nil {
 		log.Errorf("error on add route for %s - %s", backendName, address)
 		return &router.RouterError{Op: "add", Err: err}
 	}

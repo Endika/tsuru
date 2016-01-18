@@ -11,8 +11,9 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/tsuru/gnuflag"
 	"github.com/tsuru/tsuru/cmd"
-	"launchpad.net/gnuflag"
+	"github.com/tsuru/tsuru/provision"
 )
 
 type EnvSetCmd struct {
@@ -35,16 +36,22 @@ func (c *EnvSetCmd) Run(context *cmd.Context, client *cmd.Client) error {
 	if err != nil {
 		return err
 	}
-	var envList []Env
+	var envList []provision.Entry
 	for _, arg := range context.Args {
 		parts := strings.SplitN(arg, "=", 2)
-		envList = append(envList, Env{Name: parts[0], Value: parts[1]})
+		if len(parts) < 2 {
+			return fmt.Errorf("invalid variable values")
+		}
+		if parts[0] == "" {
+			return fmt.Errorf("invalid variable values")
+		}
+		envList = append(envList, provision.Entry{Name: parts[0], Value: parts[1]})
 	}
-	conf := Config{}
+	conf := provision.ScopedConfig{}
 	if c.pool == "" {
 		conf.Envs = envList
 	} else {
-		conf.Pools = []PoolEnvs{{
+		conf.Pools = []provision.PoolEntry{{
 			Name: c.pool,
 			Envs: envList,
 		}}
@@ -59,12 +66,12 @@ func (c *EnvSetCmd) Run(context *cmd.Context, client *cmd.Client) error {
 		return err
 	}
 	request.Header.Set("Content-Type", "application/json")
-	_, err = client.Do(request)
+	response, err := client.Do(request)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintln(context.Stdout, "Variables successfully set.")
-	return nil
+	defer response.Body.Close()
+	return cmd.StreamJSONResponse(context.Stdout, response)
 }
 
 func (c *EnvSetCmd) Flags() *gnuflag.FlagSet {
@@ -102,22 +109,22 @@ func (c *InfoCmd) Run(context *cmd.Context, client *cmd.Client) error {
 		return err
 	}
 	defer response.Body.Close()
-	var conf Config
+	var conf provision.ScopedConfig
 	err = json.NewDecoder(response.Body).Decode(&conf)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(context.Stdout, "Image: %s\n\nEnvironment Variables [Default]:\n", conf.Image)
+	fmt.Fprintf(context.Stdout, "Image: %s\n\nEnvironment Variables [Default]:\n", conf.Extra["image"])
 	t := cmd.Table{Headers: cmd.Row([]string{"Name", "Value"})}
 	for _, envVar := range conf.Envs {
-		t.AddRow(cmd.Row([]string{envVar.Name, envVar.Value}))
+		t.AddRow(cmd.Row([]string{envVar.Name, fmt.Sprintf("%v", envVar.Value)}))
 	}
 	context.Stdout.Write(t.Bytes())
 	for _, pool := range conf.Pools {
 		t := cmd.Table{Headers: cmd.Row([]string{"Name", "Value"})}
 		fmt.Fprintf(context.Stdout, "\nEnvironment Variables [%s]:\n", pool.Name)
 		for _, envVar := range pool.Envs {
-			t.AddRow(cmd.Row([]string{envVar.Name, envVar.Value}))
+			t.AddRow(cmd.Row([]string{envVar.Name, fmt.Sprintf("%v", envVar.Value)}))
 		}
 		context.Stdout.Write(t.Bytes())
 	}
@@ -149,6 +156,5 @@ func (c *UpgradeCmd) Run(context *cmd.Context, client *cmd.Client) error {
 		return err
 	}
 	defer response.Body.Close()
-	fmt.Fprintln(context.Stdout, "bs successfully upgraded.")
-	return nil
+	return cmd.StreamJSONResponse(context.Stdout, response)
 }

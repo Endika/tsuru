@@ -5,34 +5,16 @@
 package api
 
 import (
-	"bufio"
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"net/http"
+	"io"
+	"runtime"
 
 	"github.com/tsuru/tsuru/api/context"
 	"github.com/tsuru/tsuru/app"
-	"github.com/tsuru/tsuru/auth"
 	"github.com/tsuru/tsuru/log"
 	"golang.org/x/net/websocket"
 )
-
-func logRemove(w http.ResponseWriter, r *http.Request, t auth.Token) error {
-	appName := r.URL.Query().Get("app")
-	if appName != "" {
-		u, err := t.User()
-		if err != nil {
-			return err
-		}
-		a, err := getApp(r.URL.Query().Get("app"), u, r)
-		if err != nil {
-			return err
-		}
-		return app.LogRemove(&a)
-	}
-	return app.LogRemove(nil)
-}
 
 func addLogs(ws *websocket.Conn) {
 	var err error
@@ -58,36 +40,36 @@ func addLogs(ws *websocket.Conn) {
 		err = fmt.Errorf("wslogs: invalid token app name: %q", t.GetAppName())
 		return
 	}
-	logCh, errCh := app.LogReceiver()
-	scanner := bufio.NewScanner(ws)
-	for scanner.Scan() {
-		var entry app.Applog
-		data := bytes.TrimSpace(scanner.Bytes())
-		if len(data) == 0 {
-			continue
-		}
-		err := json.Unmarshal(data, &entry)
-		if err != nil {
-			close(logCh)
-			err = fmt.Errorf("wslogs: parsing log line %q: %s", string(data), err)
-			return
-		}
-		select {
-		case logCh <- &entry:
-		case err := <-errCh:
-			close(logCh)
-			err = fmt.Errorf("wslogs: storing log: %s", err)
-			return
-		}
-	}
-	close(logCh)
-	err = scanner.Err()
+	err = scanLogs(ws)
 	if err != nil {
-		err = fmt.Errorf("wslogs: waiting for log data: %s", err)
 		return
 	}
-	err = <-errCh
-	if err != nil {
-		err = fmt.Errorf("wslogs: storing log: %s", err)
+}
+
+func scanLogs(stream io.Reader) error {
+	dispatcher := app.NewlogDispatcher(2000000, runtime.NumCPU())
+	decoder := json.NewDecoder(stream)
+	for {
+		var entry app.Applog
+		err := decoder.Decode(&entry)
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			dispatcher.Stop()
+			return fmt.Errorf("wslogs: parsing log line: %s", err)
+		}
+		err = dispatcher.Send(&entry)
+		if err != nil {
+			// Do not disconnect by returning here, dispatcher will already
+			// retry db connection and we gain nothing by ending the WS
+			// connection.
+			log.Errorf("wslogs: error storing log: %s", err)
+		}
 	}
+	err := dispatcher.Stop()
+	if err != nil {
+		return fmt.Errorf("wslogs: error storing log: %s", err)
+	}
+	return nil
 }

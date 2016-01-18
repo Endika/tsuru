@@ -6,21 +6,39 @@ package permission
 
 import (
 	"fmt"
+	"net/http"
 	"reflect"
 	"strings"
+
+	"github.com/tsuru/tsuru/errors"
 )
 
-type permissionScheme struct {
+var ErrUnauthorized = &errors.HTTP{Code: http.StatusForbidden, Message: "You don't have permission to do this action"}
+var ErrTooManyTeams = &errors.HTTP{Code: http.StatusBadRequest, Message: "You must provide a team to execute this action."}
+
+type PermissionScheme struct {
 	name     string
-	parent   *permissionScheme
+	parent   *PermissionScheme
 	contexts []contextType
 }
 
-type PermissionSchemeList []*permissionScheme
+type PermissionSchemeList []*PermissionScheme
 
-type Context struct {
+type PermissionContext struct {
 	CtxType contextType
-	Value   interface{}
+	Value   string
+}
+
+func Context(t contextType, v string) PermissionContext {
+	return PermissionContext{CtxType: t, Value: v}
+}
+
+func Contexts(t contextType, values []string) []PermissionContext {
+	contexts := make([]PermissionContext, len(values))
+	for i, v := range values {
+		contexts[i] = PermissionContext{CtxType: t, Value: v}
+	}
+	return contexts
 }
 
 type contextType string
@@ -31,15 +49,16 @@ var (
 	CtxTeam            = contextType("team")
 	CtxPool            = contextType("pool")
 	CtxIaaS            = contextType("iaas")
+	CtxService         = contextType("service")
 	CtxServiceInstance = contextType("service-instance")
 
-	allTypes = []contextType{
-		CtxGlobal, CtxApp, CtxTeam, CtxPool, CtxIaaS, CtxServiceInstance,
+	ContextTypes = []contextType{
+		CtxGlobal, CtxApp, CtxTeam, CtxPool, CtxIaaS, CtxService, CtxServiceInstance,
 	}
 )
 
 func parseContext(ctx string) (contextType, error) {
-	for _, t := range allTypes {
+	for _, t := range ContextTypes {
 		if string(t) == ctx {
 			return t, nil
 		}
@@ -51,7 +70,7 @@ func (l PermissionSchemeList) Len() int           { return len(l) }
 func (l PermissionSchemeList) Swap(i, j int)      { l[i], l[j] = l[j], l[i] }
 func (l PermissionSchemeList) Less(i, j int) bool { return l[i].FullName() < l[j].FullName() }
 
-func (s *permissionScheme) nameParts() []string {
+func (s *PermissionScheme) nameParts() []string {
 	parent := s
 	var parts []string
 	for parent != nil {
@@ -63,7 +82,7 @@ func (s *permissionScheme) nameParts() []string {
 	return parts
 }
 
-func (s *permissionScheme) isParent(other *permissionScheme) bool {
+func (s *PermissionScheme) IsParent(other *PermissionScheme) bool {
 	root := other
 	myPointer := reflect.ValueOf(s).Pointer()
 	for root != nil {
@@ -75,7 +94,7 @@ func (s *permissionScheme) isParent(other *permissionScheme) bool {
 	return false
 }
 
-func (s *permissionScheme) FullName() string {
+func (s *PermissionScheme) FullName() string {
 	parts := s.nameParts()
 	var str string
 	for i := len(parts) - 1; i >= 0; i-- {
@@ -87,7 +106,7 @@ func (s *permissionScheme) FullName() string {
 	return str
 }
 
-func (s *permissionScheme) Identifier() string {
+func (s *PermissionScheme) Identifier() string {
 	parts := s.nameParts()
 	var str string
 	for i := len(parts) - 1; i >= 0; i-- {
@@ -99,47 +118,106 @@ func (s *permissionScheme) Identifier() string {
 	return str
 }
 
-func (s *permissionScheme) AllowedContexts() []contextType {
+func (s *PermissionScheme) AllowedContexts() []contextType {
+	contexts := []contextType{CtxGlobal}
 	if s.contexts != nil {
-		return s.contexts
+		return append(contexts, s.contexts...)
 	}
 	parent := s
 	for parent != nil {
 		if parent.contexts != nil {
-			return parent.contexts
+			return append(contexts, parent.contexts...)
 		}
 		parent = parent.parent
 	}
-	return nil
+	return contexts
 }
 
 type Permission struct {
-	Scheme  *permissionScheme
-	Context Context
+	Scheme  *PermissionScheme
+	Context PermissionContext
+}
+
+func (p *Permission) String() string {
+	value := p.Context.Value
+	if value != "" {
+		value = " " + value
+	}
+	return fmt.Sprintf("%s(%s%s)", p.Scheme.FullName(), p.Context.CtxType, value)
 }
 
 type Token interface {
 	Permissions() ([]Permission, error)
 }
 
-func Check(token Token, scheme *permissionScheme, contexts ...Context) bool {
+func ContextsFromListForPermission(perms []Permission, scheme *PermissionScheme, ctxTypes ...contextType) []PermissionContext {
+	var contexts []PermissionContext
+	for _, perm := range perms {
+		if perm.Scheme.IsParent(scheme) {
+			if len(ctxTypes) > 0 {
+				for _, t := range ctxTypes {
+					if t == perm.Context.CtxType {
+						contexts = append(contexts, perm.Context)
+					}
+				}
+			} else {
+				contexts = append(contexts, perm.Context)
+
+			}
+		}
+	}
+	return contexts
+}
+
+func ContextsForPermission(token Token, scheme *PermissionScheme, ctxTypes ...contextType) []PermissionContext {
+	perms, err := token.Permissions()
+	if err != nil {
+		return []PermissionContext{}
+	}
+	return ContextsFromListForPermission(perms, scheme, ctxTypes...)
+}
+
+func Check(token Token, scheme *PermissionScheme, contexts ...PermissionContext) bool {
 	perms, err := token.Permissions()
 	if err != nil {
 		return false
 	}
+	return CheckFromPermList(perms, scheme, contexts...)
+}
+
+func CheckFromPermList(perms []Permission, scheme *PermissionScheme, contexts ...PermissionContext) bool {
 	for _, perm := range perms {
-		if perm.Scheme.isParent(scheme) {
+		if perm.Scheme.IsParent(scheme) {
 			if perm.Context.CtxType == CtxGlobal {
 				return true
 			}
 			for _, ctx := range contexts {
-				if ctx.CtxType == perm.Context.CtxType {
-					if reflect.DeepEqual(ctx.Value, perm.Context.Value) {
-						return true
-					}
+				if ctx.CtxType == perm.Context.CtxType && ctx.Value == perm.Context.Value {
+					return true
 				}
 			}
 		}
 	}
 	return false
+}
+
+func TeamForPermission(t Token, scheme *PermissionScheme) (string, error) {
+	allContexts := ContextsForPermission(t, scheme)
+	teams := make([]string, 0, len(allContexts))
+	for _, ctx := range allContexts {
+		if ctx.CtxType == CtxGlobal {
+			teams = nil
+			break
+		}
+		if ctx.CtxType == CtxTeam {
+			teams = append(teams, ctx.Value)
+		}
+	}
+	if teams != nil && len(teams) == 0 {
+		return "", ErrUnauthorized
+	}
+	if len(teams) == 1 {
+		return teams[0], nil
+	}
+	return "", ErrTooManyTeams
 }

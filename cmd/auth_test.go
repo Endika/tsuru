@@ -74,7 +74,7 @@ func (s *S) TestNativeLoginWithoutEmailFromArg(c *check.C) {
 func (s *S) TestNativeLoginShouldNotDependOnTsuruTokenFile(c *check.C) {
 	nativeScheme()
 	rfs := &fstest.RecordingFs{}
-	f, _ := rfs.Create(JoinWithUserDir(".tsuru_target"))
+	f, _ := rfs.Create(JoinWithUserDir(".tsuru", "target"))
 	f.Write([]byte("http://localhost"))
 	f.Close()
 	fsystem = rfs
@@ -127,7 +127,7 @@ func (s *S) TestLogout(c *check.C) {
 	err := command.Run(&context, client)
 	c.Assert(err, check.IsNil)
 	c.Assert(manager.stdout.(*bytes.Buffer).String(), check.Equals, expected)
-	c.Assert(rfs.HasAction("remove "+JoinWithUserDir(".tsuru_token")), check.Equals, true)
+	c.Assert(rfs.HasAction("remove "+JoinWithUserDir(".tsuru", "token")), check.Equals, true)
 	c.Assert(called, check.Equals, true)
 }
 
@@ -160,7 +160,7 @@ func (s *S) TestLogoutNoTarget(c *check.C) {
 	err := command.Run(&context, client)
 	c.Assert(err, check.IsNil)
 	c.Assert(manager.stdout.(*bytes.Buffer).String(), check.Equals, expected)
-	c.Assert(rfs.HasAction("remove "+JoinWithUserDir(".tsuru_token")), check.Equals, true)
+	c.Assert(rfs.HasAction("remove "+JoinWithUserDir(".tsuru", "token")), check.Equals, true)
 }
 
 func (s *S) TestLoginGetSchemeCachesResult(c *check.C) {
@@ -263,7 +263,7 @@ func (s *S) TestReadTokenEnvironmentVariable(c *check.C) {
 func (s *S) TestGetUser(c *check.C) {
 	transport := cmdtest.ConditionalTransport{
 		Transport: cmdtest.Transport{
-			Message: `{"Email":"myuser@company.com","Teams":["frontend","backend","sysadmin","full stack"]}`,
+			Message: `{"Email":"myuser@company.com"}`,
 			Status:  http.StatusOK,
 		},
 		CondFunc: func(req *http.Request) bool {
@@ -273,7 +273,6 @@ func (s *S) TestGetUser(c *check.C) {
 	client := NewClient(&http.Client{Transport: &transport}, nil, manager)
 	expected := &APIUser{
 		Email: "myuser@company.com",
-		Teams: []string{"frontend", "backend", "sysadmin", "full stack"},
 	}
 	user, err := GetUser(client)
 	c.Assert(err, check.IsNil)
@@ -283,14 +282,24 @@ func (s *S) TestGetUser(c *check.C) {
 func (s *S) TestUserInfoRun(c *check.C) {
 	var called bool
 	expected := `Email: myuser@company.com
-Teams: frontend, backend, sysadmin, full stack
+Roles:
+	x(y a)
+	x(y b)
+Permissions:
+	a(y q)
 `
 	context := Context{[]string{}, manager.stdout, manager.stderr, manager.stdin}
 	command := userInfo{}
 	transport := cmdtest.ConditionalTransport{
 		Transport: cmdtest.Transport{
-			Message: `{"Email":"myuser@company.com","Teams":["frontend","backend","sysadmin","full stack"]}`,
-			Status:  http.StatusOK,
+			Message: `{"Email":"myuser@company.com","Roles":[
+	{"Name":"x","ContextType":"y","ContextValue":"a"},
+	{"Name":"x","ContextType":"y","ContextValue":"b"}
+],
+"Permissions":[
+	{"Name":"a","ContextType":"y","ContextValue":"q"}
+]}`,
+			Status: http.StatusOK,
 		},
 		CondFunc: func(req *http.Request) bool {
 			called = true

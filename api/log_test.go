@@ -6,9 +6,11 @@ package api
 
 import (
 	"fmt"
-	"net/http"
+	"io"
 	"net/http/httptest"
 	"net/url"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/tsuru/config"
@@ -19,7 +21,6 @@ import (
 	"github.com/tsuru/tsuru/repository/repositorytest"
 	"golang.org/x/net/websocket"
 	"gopkg.in/check.v1"
-	"gopkg.in/mgo.v2/bson"
 )
 
 type LogSuite struct {
@@ -35,7 +36,7 @@ func (s *LogSuite) createUserAndTeam(c *check.C) {
 	user := &auth.User{Email: "whydidifall@thewho.com", Password: "123456"}
 	_, err := nativeScheme.Create(user)
 	c.Assert(err, check.IsNil)
-	s.team = &auth.Team{Name: "tsuruteam", Users: []string{user.Email}}
+	s.team = &auth.Team{Name: "tsuruteam"}
 	err = s.conn.Teams().Insert(s.team)
 	c.Assert(err, check.IsNil)
 	s.token, err = nativeScheme.Login(map[string]string{"email": user.Email, "password": "123456"})
@@ -66,55 +67,22 @@ func (s *LogSuite) TearDownTest(c *check.C) {
 	s.logConn.Close()
 }
 
-func (s *LogSuite) TestLogRemoveAll(c *check.C) {
-	a := app.App{Name: "words"}
-	request, err := http.NewRequest("DELETE", "/logs", nil)
+func (s *LogSuite) TearDownSuite(c *check.C) {
+	conn, err := db.Conn()
 	c.Assert(err, check.IsNil)
-	recorder := httptest.NewRecorder()
-	err = s.conn.Apps().Insert(a)
+	defer conn.Close()
+	conn.Apps().Database.DropDatabase()
+	logConn, err := db.LogConn()
 	c.Assert(err, check.IsNil)
-	defer s.conn.Apps().Remove(bson.M{"name": a.Name})
-	err = a.Log("last log msg", "tsuru", "")
-	c.Assert(err, check.IsNil)
-	err = logRemove(recorder, request, s.token)
-	c.Assert(err, check.IsNil)
-	count, err := s.logConn.Logs(a.Name).Find(nil).Count()
-	c.Assert(err, check.IsNil)
-	c.Assert(count, check.Equals, 0)
-}
-
-func (s *LogSuite) TestLogRemoveByApp(c *check.C) {
-	a := app.App{
-		Name:  "words",
-		Teams: []string{s.team.Name},
-	}
-	err := s.conn.Apps().Insert(a)
-	c.Assert(err, check.IsNil)
-	defer s.conn.Apps().Remove(bson.M{"name": a.Name})
-	err = a.Log("last log msg", "tsuru", "")
-	c.Assert(err, check.IsNil)
-	a2 := app.App{Name: "words2"}
-	err = s.conn.Apps().Insert(a2)
-	c.Assert(err, check.IsNil)
-	defer s.conn.Apps().Remove(bson.M{"name": a2.Name})
-	err = a2.Log("last log msg2", "tsuru", "")
-	c.Assert(err, check.IsNil)
-	url := fmt.Sprintf("/logs?app=%s", a.Name)
-	request, err := http.NewRequest("DELETE", url, nil)
-	c.Assert(err, check.IsNil)
-	recorder := httptest.NewRecorder()
-	err = logRemove(recorder, request, s.token)
-	c.Assert(err, check.IsNil)
-	count, err := s.logConn.Logs(a2.Name).Find(nil).Count()
-	c.Assert(err, check.IsNil)
-	c.Assert(count, check.Equals, 1)
+	defer logConn.Close()
+	logConn.Logs("myapp").Database.DropDatabase()
 }
 
 func (s *S) TestAddLogsHandler(c *check.C) {
-	a1 := app.App{Name: "myapp1", Platform: "zend", Teams: []string{s.team.Name}}
+	a1 := app.App{Name: "myapp1", Platform: "zend", TeamOwner: s.team.Name}
 	err := app.CreateApp(&a1, s.user)
 	c.Assert(err, check.IsNil)
-	a2 := app.App{Name: "myapp2", Platform: "zend", Teams: []string{s.team.Name}}
+	a2 := app.App{Name: "myapp2", Platform: "zend", TeamOwner: s.team.Name}
 	err = app.CreateApp(&a2, s.user)
 	c.Assert(err, check.IsNil)
 	baseTime, err := time.Parse(time.RFC3339, "2015-06-16T15:00:00.000Z")
@@ -165,6 +133,7 @@ func (s *S) TestAddLogsHandler(c *check.C) {
 	}
 	logs, err := a1.LastLogs(3, app.Applog{})
 	c.Assert(err, check.IsNil)
+	sort.Sort(LogList(logs))
 	c.Assert(logs, check.DeepEquals, []app.Applog{
 		{Date: baseTime, Message: "msg1", Source: "web", AppName: "myapp1", Unit: "unit1"},
 		{Date: baseTime.Add(2 * time.Second), Message: "msg3", Source: "web", AppName: "myapp1", Unit: "unit3"},
@@ -172,6 +141,7 @@ func (s *S) TestAddLogsHandler(c *check.C) {
 	})
 	logs, err = a2.LastLogs(2, app.Applog{})
 	c.Assert(err, check.IsNil)
+	sort.Sort(LogList(logs))
 	c.Assert(logs, check.DeepEquals, []app.Applog{
 		{Date: baseTime.Add(time.Second), Message: "msg2", Source: "web", AppName: "myapp2", Unit: "unit2"},
 		{Date: baseTime.Add(3 * time.Second), Message: "msg4", Source: "web", AppName: "myapp2", Unit: "unit4"},
@@ -196,4 +166,35 @@ func (s *S) TestAddLogsHandlerInvalidToken(c *check.C) {
 	n, err := wsConn.Read(buffer)
 	c.Assert(err, check.IsNil)
 	c.Assert(string(buffer[:n]), check.Equals, `{"error":"wslogs: invalid token app name: \"\""}`)
+}
+
+func (s *S) BenchmarkScanLogs(c *check.C) {
+	c.StopTimer()
+	var apps []app.App
+	for i := 0; i < 200; i++ {
+		a := app.App{Name: fmt.Sprintf("myapp-%d", i), Platform: "zend", TeamOwner: s.team.Name}
+		apps = append(apps, a)
+		err := app.CreateApp(&a, s.user)
+		c.Assert(err, check.IsNil)
+		defer app.Delete(&a, nil)
+	}
+	baseMsg := `{"date": "2015-06-16T15:00:00.000Z", "message": "msg-%d", "source": "web", "appname": "%s", "unit": "unit1"}` + "\n"
+	for i := range apps {
+		// Remove overhead for first message from app from benchmark.
+		err := scanLogs(strings.NewReader(fmt.Sprintf(baseMsg, 0, apps[i].Name)))
+		c.Assert(err, check.IsNil)
+	}
+	r, w := io.Pipe()
+	go func() {
+		for i := 0; i < c.N; i++ {
+			msg := fmt.Sprintf(baseMsg, i, apps[i%len(apps)].Name)
+			_, err := w.Write([]byte(msg))
+			c.Assert(err, check.IsNil)
+		}
+		w.Close()
+	}()
+	c.StartTimer()
+	err := scanLogs(r)
+	c.Assert(err, check.IsNil)
+	c.StopTimer()
 }

@@ -1,4 +1,4 @@
-// Copyright 2015 tsuru authors. All rights reserved.
+// Copyright 2016 tsuru authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -7,6 +7,7 @@ package docker
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/fsouza/go-dockerclient"
+	"github.com/fsouza/go-dockerclient/external/github.com/docker/docker/pkg/stdcopy"
 	"github.com/fsouza/go-dockerclient/testing"
 	"github.com/tsuru/config"
 	"github.com/tsuru/docker-cluster/cluster"
@@ -29,6 +31,7 @@ import (
 	"github.com/tsuru/tsuru/provision/docker/container"
 	"github.com/tsuru/tsuru/provision/docker/healer"
 	"github.com/tsuru/tsuru/provision/provisiontest"
+	"github.com/tsuru/tsuru/queue"
 	"github.com/tsuru/tsuru/quota"
 	"github.com/tsuru/tsuru/repository"
 	"github.com/tsuru/tsuru/router/routertest"
@@ -102,6 +105,58 @@ func (s *S) TestProvisionerRestart(c *check.C) {
 	c.Assert(dbConts[0].HostPort, check.Equals, expectedPort)
 }
 
+func (s *S) TestProvisionerRestartStoppedContainer(c *check.C) {
+	app := provisiontest.NewFakeApp("almah", "static", 1)
+	customData := map[string]interface{}{
+		"processes": map[string]interface{}{
+			"web":    "python web.py",
+			"worker": "python worker.py",
+		},
+	}
+	cont1, err := s.newContainer(&newContainerOpts{
+		AppName:         app.GetName(),
+		ProcessName:     "web",
+		ImageCustomData: customData,
+		Image:           "tsuru/app-" + app.GetName(),
+	}, nil)
+	c.Assert(err, check.IsNil)
+	defer s.removeTestContainer(cont1)
+	cont2, err := s.newContainer(&newContainerOpts{
+		AppName:         app.GetName(),
+		ProcessName:     "worker",
+		ImageCustomData: customData,
+		Image:           "tsuru/app-" + app.GetName(),
+	}, nil)
+	c.Assert(err, check.IsNil)
+	defer s.removeTestContainer(cont2)
+	err = s.p.Stop(app, "")
+	c.Assert(err, check.IsNil)
+	dockerContainer, err := s.p.Cluster().InspectContainer(cont1.ID)
+	c.Assert(err, check.IsNil)
+	c.Assert(dockerContainer.State.Running, check.Equals, false)
+	dockerContainer, err = s.p.Cluster().InspectContainer(cont2.ID)
+	c.Assert(err, check.IsNil)
+	c.Assert(dockerContainer.State.Running, check.Equals, false)
+	err = s.p.Restart(app, "", nil)
+	c.Assert(err, check.IsNil)
+	dbConts, err := s.p.listAllContainers()
+	c.Assert(err, check.IsNil)
+	c.Assert(dbConts, check.HasLen, 2)
+	c.Assert(dbConts[0].ID, check.Not(check.Equals), cont1.ID)
+	c.Assert(dbConts[0].AppName, check.Equals, app.GetName())
+	c.Assert(dbConts[0].Status, check.Equals, provision.StatusStarting.String())
+	c.Assert(dbConts[1].ID, check.Not(check.Equals), cont1.ID)
+	c.Assert(dbConts[1].AppName, check.Equals, app.GetName())
+	c.Assert(dbConts[1].Status, check.Equals, provision.StatusStarting.String())
+	dockerContainer, err = s.p.Cluster().InspectContainer(dbConts[0].ID)
+	c.Assert(err, check.IsNil)
+	c.Assert(dockerContainer.State.Running, check.Equals, true)
+	expectedIP := dockerContainer.NetworkSettings.IPAddress
+	expectedPort := dockerContainer.NetworkSettings.Ports["8888/tcp"][0].HostPort
+	c.Assert(dbConts[0].IP, check.Equals, expectedIP)
+	c.Assert(dbConts[0].HostPort, check.Equals, expectedPort)
+}
+
 type containerByProcessList []container.Container
 
 func (l containerByProcessList) Len() int           { return len(l) }
@@ -157,6 +212,37 @@ func (s *S) TestProvisionerRestartProcess(c *check.C) {
 	expectedPort := dockerContainer.NetworkSettings.Ports["8888/tcp"][0].HostPort
 	c.Assert(dbConts[0].IP, check.Equals, expectedIP)
 	c.Assert(dbConts[0].HostPort, check.Equals, expectedPort)
+}
+
+func (s *S) TestProvisionerRestartRebuildRoutesInQueue(c *check.C) {
+	err := s.p.Initialize()
+	c.Assert(err, check.IsNil)
+	coll := s.storage.Apps()
+	a := &app.App{
+		Name:     "almah",
+		Platform: "static",
+	}
+	err = coll.Insert(a)
+	c.Assert(err, check.IsNil)
+	err = s.p.Provision(a)
+	c.Assert(err, check.IsNil)
+	imageId := "tsuru/app-" + a.Name + ":v1"
+	err = s.newFakeImage(s.p, imageId, nil)
+	c.Assert(err, check.IsNil)
+	_, err = s.p.runCreateUnitsPipeline(nil, a, map[string]*containersToAdd{"web": {Quantity: 1}}, imageId)
+	c.Assert(err, check.IsNil)
+	invalidAddr, err := url.Parse("http://invalid.addr")
+	c.Assert(err, check.IsNil)
+	err = routertest.FakeRouter.AddRoute(a.GetName(), invalidAddr)
+	c.Assert(err, check.IsNil)
+	routertest.FakeRouter.FailForIp(invalidAddr.String())
+	err = s.p.Restart(a, "", nil)
+	c.Assert(err, check.IsNil)
+	c.Assert(routertest.FakeRouter.HasRoute(a.GetName(), invalidAddr.String()), check.Equals, true)
+	routertest.FakeRouter.RemoveFailForIp(invalidAddr.String())
+	err = queue.TestingWaitQueueTasks(1, 10*time.Second)
+	c.Assert(err, check.IsNil)
+	c.Assert(routertest.FakeRouter.HasRoute(a.GetName(), invalidAddr.String()), check.Equals, false)
 }
 
 func (s *S) stopContainers(endpoint string, n uint) <-chan bool {
@@ -219,7 +305,7 @@ func (s *S) TestDeploy(c *check.C) {
 	c.Assert(err, check.IsNil)
 	err = app.Deploy(app.DeployOptions{
 		App:          &a,
-		Version:      "master",
+		ArchiveURL:   "https://mystorage.com/archive.tar.gz",
 		Commit:       "123",
 		OutputStream: w,
 	})
@@ -267,7 +353,7 @@ func (s *S) TestDeployQuotaExceeded(c *check.C) {
 	c.Assert(err, check.IsNil)
 	err = app.Deploy(app.DeployOptions{
 		App:          &a,
-		Version:      "master",
+		ArchiveURL:   "https://mystorage.com/archive.tar.gz",
 		Commit:       "123",
 		OutputStream: w,
 	})
@@ -311,7 +397,7 @@ func (s *S) TestDeployErasesOldImages(c *check.C) {
 	c.Assert(err, check.IsNil)
 	err = app.Deploy(app.DeployOptions{
 		App:          &a,
-		Version:      "master",
+		ArchiveURL:   "https://mystorage.com/archive.tar.gz",
 		Commit:       "123",
 		OutputStream: w,
 	})
@@ -327,7 +413,7 @@ func (s *S) TestDeployErasesOldImages(c *check.C) {
 	c.Assert(got, check.DeepEquals, expected)
 	err = app.Deploy(app.DeployOptions{
 		App:          &a,
-		Version:      "master",
+		ArchiveURL:   "https://mystorage.com/archive.tar.gz",
 		Commit:       "123",
 		OutputStream: w,
 	})
@@ -361,9 +447,9 @@ func (s *S) TestDeployErasesOldImagesIfFailed(c *check.C) {
 		data, _ := ioutil.ReadAll(r.Body)
 		r.Body = ioutil.NopCloser(bytes.NewBuffer(data))
 		var result docker.Config
-		err := json.Unmarshal(data, &result)
-		if err == nil {
-			if result.Image == "tsuru/app-appdeployimagetest:v1" {
+		jsonErr := json.Unmarshal(data, &result)
+		if jsonErr == nil {
+			if result.Image == "tsuru/python:latest" {
 				w.WriteHeader(http.StatusInternalServerError)
 				return
 			}
@@ -373,9 +459,9 @@ func (s *S) TestDeployErasesOldImagesIfFailed(c *check.C) {
 	w := safe.NewBuffer(make([]byte, 2048))
 	err = app.Deploy(app.DeployOptions{
 		App:          &a,
-		Version:      "master",
 		Commit:       "123",
 		OutputStream: w,
+		ArchiveURL:   "https://mystorage.com/archive.tar.gz",
 	})
 	c.Assert(err, check.NotNil)
 	imgs, err := s.p.Cluster().ListImages(docker.ListImagesOptions{All: true})
@@ -417,7 +503,7 @@ func (s *S) TestDeployErasesOldImagesWithLongHistory(c *check.C) {
 	c.Assert(err, check.IsNil)
 	err = app.Deploy(app.DeployOptions{
 		App:          &a,
-		Version:      "master",
+		ArchiveURL:   "https://mystorage.com/archive.tar.gz",
 		Commit:       "123",
 		OutputStream: w,
 	})
@@ -433,7 +519,7 @@ func (s *S) TestDeployErasesOldImagesWithLongHistory(c *check.C) {
 	c.Assert(got, check.DeepEquals, expected)
 	err = app.Deploy(app.DeployOptions{
 		App:          &a,
-		Version:      "master",
+		ArchiveURL:   "https://mystorage.com/archive.tar.gz",
 		Commit:       "123",
 		OutputStream: w,
 	})
@@ -450,7 +536,7 @@ func (s *S) TestDeployErasesOldImagesWithLongHistory(c *check.C) {
 	c.Assert(got, check.DeepEquals, expected)
 	err = app.Deploy(app.DeployOptions{
 		App:          &a,
-		Version:      "master",
+		ArchiveURL:   "https://mystorage.com/archive.tar.gz",
 		Commit:       "123",
 		OutputStream: w,
 	})
@@ -510,7 +596,7 @@ func (s *S) TestProvisionerUploadDeploy(c *check.C) {
 	c.Assert(serviceBodies[0], check.Matches, ".*unit-host="+units[0].Ip)
 }
 
-func (s *S) TestImageDeploy(c *check.C) {
+func (s *S) TestRollbackDeploy(c *check.C) {
 	err := s.newFakeImage(s.p, "tsuru/app-otherapp:v1", nil)
 	c.Assert(err, check.IsNil)
 	err = appendAppImageName("otherapp", "tsuru/app-otherapp:v1")
@@ -529,6 +615,7 @@ func (s *S) TestImageDeploy(c *check.C) {
 		App:          &a,
 		OutputStream: w,
 		Image:        "tsuru/app-otherapp:v1",
+		Rollback:     true,
 	})
 	c.Assert(err, check.IsNil)
 	units, err := a.Units()
@@ -536,28 +623,7 @@ func (s *S) TestImageDeploy(c *check.C) {
 	c.Assert(units, check.HasLen, 1)
 }
 
-func (s *S) TestImageDeployInvalidImage(c *check.C) {
-	a := app.App{
-		Name:     "otherapp",
-		Platform: "python",
-	}
-	err := s.storage.Apps().Insert(a)
-	c.Assert(err, check.IsNil)
-	s.p.Provision(&a)
-	defer s.p.Destroy(&a)
-	w := safe.NewBuffer(make([]byte, 2048))
-	err = app.Deploy(app.DeployOptions{
-		App:          &a,
-		OutputStream: w,
-		Image:        "tsuru/app-otherapp:v1",
-	})
-	c.Assert(err, check.ErrorMatches, "invalid image for app otherapp: tsuru/app-otherapp:v1")
-	units, err := a.Units()
-	c.Assert(err, check.IsNil)
-	c.Assert(units, check.HasLen, 0)
-}
-
-func (s *S) TestImageDeployFailureDoesntEraseImage(c *check.C) {
+func (s *S) TestRollbackDeployFailureDoesntEraseImage(c *check.C) {
 	err := s.newFakeImage(s.p, "tsuru/app-otherapp:v1", nil)
 	c.Assert(err, check.IsNil)
 	err = appendAppImageName("otherapp", "tsuru/app-otherapp:v1")
@@ -574,8 +640,8 @@ func (s *S) TestImageDeployFailureDoesntEraseImage(c *check.C) {
 		data, _ := ioutil.ReadAll(r.Body)
 		r.Body = ioutil.NopCloser(bytes.NewBuffer(data))
 		var result docker.Config
-		err := json.Unmarshal(data, &result)
-		if err == nil {
+		jsonErr := json.Unmarshal(data, &result)
+		if jsonErr == nil {
 			if result.Image == "tsuru/app-otherapp:v1" {
 				w.WriteHeader(http.StatusInternalServerError)
 				return
@@ -588,6 +654,7 @@ func (s *S) TestImageDeployFailureDoesntEraseImage(c *check.C) {
 		App:          &a,
 		OutputStream: w,
 		Image:        "tsuru/app-otherapp:v1",
+		Rollback:     true,
 	})
 	c.Assert(err, check.NotNil)
 	units, err := a.Units()
@@ -598,6 +665,184 @@ func (s *S) TestImageDeployFailureDoesntEraseImage(c *check.C) {
 	c.Assert(imgs, check.HasLen, 1)
 	c.Assert(imgs[0].RepoTags, check.HasLen, 1)
 	c.Assert("tsuru/app-otherapp:v1", check.Equals, imgs[0].RepoTags[0])
+}
+
+func (s *S) TestImageDeploy(c *check.C) {
+	u, _ := url.Parse(s.server.URL())
+	imageName := fmt.Sprintf("%s/%s", u.Host, "customimage")
+	config.Set("docker:registry", u.Host)
+	defer config.Unset("docker:registry")
+	s.server.CustomHandler("/containers/.*/attach", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			http.Error(w, "cannot hijack connection", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/vnd.docker.raw-stream")
+		w.WriteHeader(http.StatusOK)
+		conn, _, err := hijacker.Hijack()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		outStream := stdcopy.NewStdWriter(conn, stdcopy.Stdout)
+		fmt.Fprintf(outStream, "")
+		conn.Close()
+	}))
+	s.server.CustomHandler(fmt.Sprintf("/images/%s/json", imageName), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		response := docker.Image{
+			Config: &docker.Config{
+				Entrypoint: []string{"/bin/sh", "-c", "python test.py"},
+			},
+		}
+		j, _ := json.Marshal(response)
+		w.Write(j)
+	}))
+	customData := map[string]interface{}{}
+	err := s.newFakeImage(s.p, imageName, customData)
+	c.Assert(err, check.IsNil)
+	pushOpts := docker.PushImageOptions{
+		Name:     imageName,
+		Registry: s.server.URL(),
+	}
+	err = s.p.Cluster().PushImage(pushOpts, mainDockerProvisioner.RegistryAuthConfig())
+	c.Assert(err, check.IsNil)
+	a := app.App{
+		Name:     "otherapp",
+		Platform: "python",
+		Quota:    quota.Unlimited,
+	}
+	err = s.storage.Apps().Insert(a)
+	c.Assert(err, check.IsNil)
+	s.p.Provision(&a)
+	defer s.p.Destroy(&a)
+	dataColl, err := imageCustomDataColl()
+	defer dataColl.Close()
+	c.Assert(err, check.IsNil)
+	dataColl.RemoveId(imageName)
+	w := safe.NewBuffer(make([]byte, 2048))
+	err = app.Deploy(app.DeployOptions{
+		App:          &a,
+		OutputStream: w,
+		Image:        imageName,
+	})
+	c.Assert(err, check.IsNil)
+	units, err := a.Units()
+	c.Assert(err, check.IsNil)
+	c.Assert(units, check.HasLen, 1)
+	appCurrentImage, err := appCurrentImageName(a.GetName())
+	imd, err := getImageCustomData(appCurrentImage)
+	c.Assert(err, check.IsNil)
+	expectedProcesses := map[string]string{"web": "/bin/sh -c python test.py"}
+	c.Assert(imd.Processes, check.DeepEquals, expectedProcesses)
+	updatedApp, err := app.GetByName(a.Name)
+	c.Assert(err, check.IsNil)
+	c.Assert(updatedApp.GetUpdatePlatform(), check.Equals, true)
+}
+
+func (s *S) TestImageDeployWithProcfile(c *check.C) {
+	u, _ := url.Parse(s.server.URL())
+	imageName := fmt.Sprintf("%s/%s", u.Host, "customimage")
+	config.Set("docker:registry", u.Host)
+	defer config.Unset("docker:registry")
+	s.server.CustomHandler("/containers/.*/attach", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			http.Error(w, "cannot hijack connection", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/vnd.docker.raw-stream")
+		w.WriteHeader(http.StatusOK)
+		conn, _, err := hijacker.Hijack()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		outStream := stdcopy.NewStdWriter(conn, stdcopy.Stdout)
+		fmt.Fprintf(outStream, "web: test.sh\n")
+		conn.Close()
+	}))
+	customData := map[string]interface{}{}
+	err := s.newFakeImage(s.p, imageName, customData)
+	c.Assert(err, check.IsNil)
+	a := app.App{
+		Name:     "otherapp",
+		Platform: "python",
+		Quota:    quota.Unlimited,
+	}
+	err = s.storage.Apps().Insert(a)
+	c.Assert(err, check.IsNil)
+	s.p.Provision(&a)
+	defer s.p.Destroy(&a)
+	dataColl, err := imageCustomDataColl()
+	defer dataColl.Close()
+	c.Assert(err, check.IsNil)
+	dataColl.RemoveId(imageName)
+	w := safe.NewBuffer(make([]byte, 2048))
+	err = app.Deploy(app.DeployOptions{
+		App:          &a,
+		OutputStream: w,
+		Image:        imageName,
+	})
+	c.Assert(err, check.IsNil)
+	appCurrentImage, err := appCurrentImageName(a.GetName())
+	imd, err := getImageCustomData(appCurrentImage)
+	c.Assert(err, check.IsNil)
+	expectedProcesses := map[string]string{"web": "test.sh"}
+	c.Assert(imd.Processes, check.DeepEquals, expectedProcesses)
+}
+
+func (s *S) TestImageDeployShouldHaveAnEntrypoint(c *check.C) {
+	s.server.CustomHandler("/containers/.*/attach", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			http.Error(w, "cannot hijack connection", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/vnd.docker.raw-stream")
+		w.WriteHeader(http.StatusOK)
+		conn, _, err := hijacker.Hijack()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		outStream := stdcopy.NewStdWriter(conn, stdcopy.Stdout)
+		fmt.Fprintf(outStream, "")
+		conn.Close()
+	}))
+	s.server.CustomHandler("/images/customimage/json", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		response := docker.Image{
+			Config: &docker.Config{
+				Entrypoint: []string{},
+			},
+		}
+		j, _ := json.Marshal(response)
+		w.Write(j)
+	}))
+	customData := map[string]interface{}{}
+	err := s.newFakeImage(s.p, "customimage", customData)
+	c.Assert(err, check.IsNil)
+	a := app.App{
+		Name:     "otherapp",
+		Platform: "python",
+		Quota:    quota.Unlimited,
+	}
+	err = s.storage.Apps().Insert(a)
+	c.Assert(err, check.IsNil)
+	s.p.Provision(&a)
+	defer s.p.Destroy(&a)
+	dataColl, err := imageCustomDataColl()
+	defer dataColl.Close()
+	c.Assert(err, check.IsNil)
+	dataColl.RemoveId("customimage")
+	w := safe.NewBuffer(make([]byte, 2048))
+	err = app.Deploy(app.DeployOptions{
+		App:          &a,
+		OutputStream: w,
+		Image:        "customimage",
+	})
+	c.Assert(err, check.NotNil)
+	c.Assert(err, check.Equals, ErrEntrypointOrProcfileNotFound)
 }
 
 func (s *S) TestProvisionerDestroy(c *check.C) {
@@ -650,7 +895,7 @@ func (s *S) TestProvisionerDestroyRemovesImage(c *check.C) {
 	c.Assert(err, check.IsNil)
 	err = app.Deploy(app.DeployOptions{
 		App:          &a,
-		Version:      "master",
+		ArchiveURL:   "https://mystorage.com/archive.tar.gz",
 		Commit:       "123",
 		OutputStream: w,
 	})
@@ -1204,7 +1449,10 @@ func (s *S) TestProvisionSetUnitStatusNoAppName(c *check.C) {
 
 func (s *S) TestProvisionerSetUnitStatusUnitNotFound(c *check.C) {
 	err := s.p.SetUnitStatus(provision.Unit{ID: "mycontainer", AppName: "myapp"}, provision.StatusError)
-	c.Assert(err, check.Equals, provision.ErrUnitNotFound)
+	c.Assert(err, check.NotNil)
+	e, ok := err.(*provision.UnitNotFoundError)
+	c.Assert(ok, check.Equals, true)
+	c.Assert(e.ID, check.Equals, "mycontainer")
 }
 
 func (s *S) TestProvisionerSetUnitStatusBuildingContainer(c *check.C) {
@@ -1269,9 +1517,9 @@ func (s *S) TestProvisionerExecuteCommandExcludesBuildContainers(c *check.C) {
 	c.Assert(err, check.IsNil)
 	container4, err := s.newContainer(&newContainerOpts{AppName: app.GetName()}, nil)
 	c.Assert(err, check.IsNil)
-	container2.SetStatus(s.p, provision.StatusCreated.String(), true)
-	container3.SetStatus(s.p, provision.StatusBuilding.String(), true)
-	container4.SetStatus(s.p, provision.StatusStopped.String(), true)
+	container2.SetStatus(s.p, provision.StatusCreated, true)
+	container3.SetStatus(s.p, provision.StatusBuilding, true)
+	container4.SetStatus(s.p, provision.StatusStopped, true)
 	containers := []*container.Container{
 		container1,
 		container2,
@@ -1354,7 +1602,6 @@ func (s *S) TestAdminCommands(c *check.C) {
 		&addNodeToSchedulerCmd{},
 		&removeNodeFromSchedulerCmd{},
 		&listNodesInTheSchedulerCmd{},
-		fixContainersCmd{},
 		&healer.ListHealingHistoryCmd{},
 		&autoScaleRunCmd{},
 		&listAutoScaleHistoryCmd{},
@@ -1636,7 +1883,11 @@ func (s *S) TestProvisionerPlatformAdd(c *check.C) {
 		cluster.Node{Address: server.URL()})
 	args := make(map[string]string)
 	args["dockerfile"] = "http://localhost/Dockerfile"
-	err = p.PlatformAdd("test", args, bytes.NewBuffer(nil))
+	err = p.PlatformAdd(provision.PlatformOptions{
+		Name:   "test",
+		Args:   args,
+		Output: ioutil.Discard,
+	})
 	c.Assert(err, check.IsNil)
 	c.Assert(len(requests) >= 3, check.Equals, true)
 	requests = requests[len(requests)-3:]
@@ -1648,18 +1899,53 @@ func (s *S) TestProvisionerPlatformAdd(c *check.C) {
 	c.Assert(requests[2].URL.Path, check.Equals, "/images/localhost:3030/tsuru/test/push")
 }
 
+func (s *S) TestProvisionerPlatformAddData(c *check.C) {
+	var requests []*http.Request
+	server, err := testing.NewServer("127.0.0.1:0", nil, func(r *http.Request) {
+		requests = append(requests, r)
+	})
+	c.Assert(err, check.IsNil)
+	defer server.Stop()
+	config.Set("docker:registry", "localhost:3030")
+	defer config.Unset("docker:registry")
+	var p dockerProvisioner
+	err = p.Initialize()
+	c.Assert(err, check.IsNil)
+	p.cluster, _ = cluster.New(nil, &cluster.MapStorage{}, cluster.Node{Address: server.URL()})
+	dockerfile := "FROM tsuru/java"
+	err = p.PlatformAdd(provision.PlatformOptions{
+		Name:   "test",
+		Args:   map[string]string{"dockerfile": "http://localhost"},
+		Output: ioutil.Discard,
+		Input:  strings.NewReader(dockerfile),
+	})
+	c.Assert(err, check.IsNil)
+	c.Assert(len(requests) >= 3, check.Equals, true)
+	requests = requests[len(requests)-3:]
+	c.Assert(requests[0].URL.Path, check.Equals, "/build")
+	queryString := requests[0].URL.Query()
+	c.Assert(queryString.Get("t"), check.Equals, platformImageName("test"))
+	c.Assert(queryString.Get("remote"), check.Equals, "")
+	c.Assert(requests[1].URL.Path, check.Equals, "/images/localhost:3030/tsuru/test:latest/json")
+	c.Assert(requests[2].URL.Path, check.Equals, "/images/localhost:3030/tsuru/test/push")
+}
+
 func (s *S) TestProvisionerPlatformAddWithoutArgs(c *check.C) {
-	err := s.p.PlatformAdd("test", nil, nil)
+	err := s.p.PlatformAdd(provision.PlatformOptions{Name: "test"})
 	c.Assert(err, check.NotNil)
-	c.Assert(err.Error(), check.Equals, "Dockerfile is required.")
+	c.Assert(err.Error(), check.Equals, "Dockerfile is required")
 }
 
 func (s *S) TestProvisionerPlatformAddShouldValidateArgs(c *check.C) {
 	args := make(map[string]string)
 	args["dockerfile"] = "not_a_url"
-	err := s.p.PlatformAdd("test", args, bytes.NewBuffer(nil))
+	err := s.p.PlatformAdd(provision.PlatformOptions{
+		Name:   "test",
+		Args:   args,
+		Output: ioutil.Discard,
+	})
 	c.Assert(err, check.NotNil)
-	c.Assert(err.Error(), check.Equals, "dockerfile parameter should be an url.")
+	c.Assert(err.Error(), check.Equals, "dockerfile parameter must be a URL")
 }
 
 func (s *S) TestProvisionerPlatformAddWithoutNode(c *check.C) {
@@ -1677,7 +1963,11 @@ func (s *S) TestProvisionerPlatformAddWithoutNode(c *check.C) {
 	p.cluster, _ = cluster.New(nil, &cluster.MapStorage{})
 	args := make(map[string]string)
 	args["dockerfile"] = "http://localhost/Dockerfile"
-	err = p.PlatformAdd("test", args, bytes.NewBuffer(nil))
+	err = p.PlatformAdd(provision.PlatformOptions{
+		Name:   "test",
+		Args:   args,
+		Output: ioutil.Discard,
+	})
 	c.Assert(err, check.NotNil)
 }
 
@@ -1699,7 +1989,11 @@ func (s *S) TestProvisionerPlatformRemove(c *check.C) {
 	p.cluster, _ = cluster.New(nil, &cluster.MapStorage{},
 		cluster.Node{Address: server.URL()})
 	var buf bytes.Buffer
-	err = p.PlatformAdd("test", map[string]string{"dockerfile": "http://localhost/Dockerfile"}, &buf)
+	err = p.PlatformAdd(provision.PlatformOptions{
+		Name:   "test",
+		Args:   map[string]string{"dockerfile": "http://localhost/Dockerfile"},
+		Output: &buf,
+	})
 	c.Assert(err, check.IsNil)
 	err = p.PlatformRemove("test")
 	c.Assert(err, check.IsNil)
@@ -2091,12 +2385,11 @@ func (s *S) TestDryMode(c *check.C) {
 }
 
 func (s *S) TestMetricEnvs(c *check.C) {
-	err := bs.SaveEnvs(bs.EnvMap{}, bs.PoolEnvMap{
-		"mypool": bs.EnvMap{
-			"METRICS_BACKEND":      "LOGSTASH",
-			"METRICS_LOGSTASH_URI": "localhost:2222",
-		},
-	})
+	conf, err := bs.LoadConfig(nil)
+	c.Assert(err, check.IsNil)
+	conf.AddPool("mypool", "METRICS_BACKEND", "LOGSTASH")
+	conf.AddPool("mypool", "METRICS_LOGSTASH_URI", "localhost:2222")
+	err = conf.SaveEnvs()
 	c.Assert(err, check.IsNil)
 	appInstance := &app.App{
 		Name: "impius",
@@ -2148,4 +2441,80 @@ func (s *S) TestInitializeSetsBSHook(c *check.C) {
 	c.Assert(err, check.IsNil)
 	c.Assert(p.cluster, check.NotNil)
 	c.Assert(p.cluster.Hook, check.DeepEquals, &bs.ClusterHook{Provisioner: &p})
+}
+
+func (s *S) TestProvisionerLogsEnabled(c *check.C) {
+	appName := "my-fake-app"
+	fakeApp := provisiontest.NewFakeApp(appName, "python", 0)
+	fakeApp.Pool = "mypool"
+	tests := []struct {
+		envMap     map[string]string
+		poolEnvMap map[string]map[string]string
+		enabled    bool
+		msg        string
+		err        error
+	}{
+		{nil, nil, true, "", nil},
+		{map[string]string{}, nil, true, "", nil},
+		{map[string]string{"LOG_BACKENDS": "xxx"}, nil, false, "Logs not available through tsuru. Enabled log backends are:\n* xxx", nil},
+		{map[string]string{"LOG_BACKENDS": "xxx", "LOG_XXX_DOC": "my doc"}, nil, false, "Logs not available through tsuru. Enabled log backends are:\n* xxx: my doc", nil},
+		{map[string]string{"LOG_BACKENDS": "a, b , c"}, nil, false, "Logs not available through tsuru. Enabled log backends are:\n* a\n* b\n* c", nil},
+		{map[string]string{}, map[string]map[string]string{"mypool": {"LOG_BACKENDS": "abc"}}, false, "Logs not available through tsuru. Enabled log backends are:\n* abc", nil},
+		{map[string]string{}, map[string]map[string]string{"mypool": {"LOG_BACKENDS": "abc", "LOG_ABC_DOC": "doc"}}, false, "Logs not available through tsuru. Enabled log backends are:\n* abc: doc", nil},
+		{map[string]string{}, map[string]map[string]string{"otherpool": {"LOG_BACKENDS": "abc"}}, true, "", nil},
+		{map[string]string{}, map[string]map[string]string{"mypool": {"LOG_BACKENDS": "abc, tsuru "}}, true, "", nil},
+	}
+	for _, t := range tests {
+		if t.envMap != nil || t.poolEnvMap != nil {
+			conf, err := bs.LoadConfig(nil)
+			c.Assert(err, check.IsNil)
+			conf.ResetEnvs()
+			for k, v := range t.envMap {
+				conf.Add(k, v)
+			}
+			for pool, envs := range t.poolEnvMap {
+				for k, v := range envs {
+					conf.AddPool(pool, k, v)
+				}
+			}
+			err = conf.SaveEnvs()
+			c.Assert(err, check.IsNil)
+		}
+		enabled, msg, err := s.p.LogsEnabled(fakeApp)
+		c.Assert(err, check.Equals, t.err)
+		c.Assert(enabled, check.Equals, t.enabled)
+		c.Assert(msg, check.Equals, t.msg)
+	}
+}
+
+func (s *S) TestProvisionerRoutableUnits(c *check.C) {
+	appName := "my-fake-app"
+	fakeApp := provisiontest.NewFakeApp(appName, "python", 0)
+	routes, err := s.p.RoutableUnits(fakeApp)
+	c.Assert(err, check.IsNil)
+	c.Assert(routes, check.DeepEquals, []provision.Unit{})
+	err = appendAppImageName(appName, "myimg")
+	c.Assert(err, check.IsNil)
+	err = pullAppImageNames(appName, []string{"myimg"})
+	c.Assert(err, check.IsNil)
+	routes, err = s.p.RoutableUnits(fakeApp)
+	c.Assert(err, check.IsNil)
+	c.Assert(routes, check.DeepEquals, []provision.Unit{})
+	err = appendAppImageName(appName, "myimg")
+	c.Assert(err, check.IsNil)
+	err = s.newFakeImage(s.p, "myimg", nil)
+	c.Assert(err, check.IsNil)
+	conts, err := addContainersWithHost(&changeUnitsPipelineArgs{
+		toAdd:       map[string]*containersToAdd{"web": {Quantity: 1}},
+		app:         fakeApp,
+		imageId:     "myimg",
+		provisioner: s.p,
+	})
+	c.Assert(err, check.IsNil)
+	c.Assert(conts, check.HasLen, 1)
+	routes, err = s.p.RoutableUnits(fakeApp)
+	c.Assert(err, check.IsNil)
+	c.Assert(routes, check.DeepEquals, []provision.Unit{
+		conts[0].AsUnit(fakeApp),
+	})
 }

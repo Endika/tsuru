@@ -458,22 +458,6 @@ Deprecated. See ``pubsub:redis-db``.
 
 .. _config_admin_user:
 
-Admin users
------------
-
-tsuru has a very simple way to identify admin users: an admin user is a user
-that is the member of the admin team, and the admin team is defined in the
-configuration file, using the ``admin-team`` setting.
-
-.. _config_admin_team:
-
-admin-team
-++++++++++
-
-``admin-team`` is the name of the administration team for the current tsuru
-installation. All members of the administration team is able to use the
-``tsuru-admin`` command.
-
 Quota management
 ----------------
 
@@ -1084,6 +1068,27 @@ iaas:cloudstack:wait-timeout
 Number of seconds to wait for the machine to be created. Defaults to 300 (5
 minutes).
 
+DigitalOcean IaaS
+-----------------
+
+iaas:digitalocean:token
++++++++++++++++++++++++
+
+The access token used for communication with the DigitalOcean API.
+
+iaas:digitalocean:url
++++++++++++++++++++++
+
+The URL of the DigitalOcean API. This is optional, and defaults to
+"https://api.digitalocean.com/".
+
+iaas:digitalocean:user-data
++++++++++++++++++++++++++++
+
+A URL for which the response body will be sent to DigitalOcean as user-data.
+Defaults to a script which will run `tsuru now installation
+<https://github.com/tsuru/now>`_.
+
 .. _config_custom_iaas:
 
 Custom IaaS
@@ -1109,7 +1114,7 @@ IaaS. As an example, having the configuration below would allow you to call
 .. highlight:: yaml
 
 ::
-    
+
     iaas:
         custom:
             region1_cloudstack:
@@ -1117,7 +1122,7 @@ IaaS. As an example, having the configuration below would allow you to call
                 url: http://region1.url/
                 secret-key: mysecretkey
         cloudstack:
-            api-key: myapikey    
+            api-key: myapikey
 
 
 Sample file
@@ -1132,7 +1137,6 @@ Here is a complete example:
     listen: "0.0.0.0:8080"
     debug: true
     host: http://<machine-public-addr>:8080 # This port must be the same as in the "listen" conf
-    admin-team: admin
     auth:
         user-registration: true
         scheme: native

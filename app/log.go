@@ -7,17 +7,18 @@ package app
 import (
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/tsuru/tsuru/db"
-	"github.com/tsuru/tsuru/db/storage"
 	"github.com/tsuru/tsuru/log"
 	"github.com/tsuru/tsuru/queue"
 )
 
 var LogPubSubQueuePrefix = "pubsub:"
+var bulkMaxWaitTime = time.Second
 
 type LogListener struct {
-	C <-chan Applog
+	c <-chan Applog
 	q queue.PubSubQ
 }
 
@@ -54,14 +55,18 @@ func NewLogListener(a *App, filterLog Applog) (*LogListener, error) {
 			}
 		}
 	}()
-	l := LogListener{C: c, q: pubSubQ}
+	l := LogListener{c: c, q: pubSubQ}
 	return &l, nil
+}
+
+func (l *LogListener) ListenChan() <-chan Applog {
+	return l.c
 }
 
 func (l *LogListener) Close() (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			err = fmt.Errorf("Recovered panic closing listener (possible double close): %#v", r)
+			err = fmt.Errorf("Recovered panic closing listener (possible double close): %v", r)
 		}
 	}()
 	err = l.q.UnSub()
@@ -92,58 +97,130 @@ func notify(appName string, messages []interface{}) {
 	}
 }
 
-// LogRemove removes the app log.
-func LogRemove(a *App) error {
-	conn, err := db.LogConn()
-	if err != nil {
-		return err
+type logDispatcher struct {
+	dispatchers map[string]*appLogDispatcher
+	msgCh       chan *msgLog
+}
+
+type msgLog struct {
+	dispatcher *appLogDispatcher
+	msg        *Applog
+}
+
+func NewlogDispatcher(chanSize, numberGoroutines int) *logDispatcher {
+	d := &logDispatcher{
+		dispatchers: make(map[string]*appLogDispatcher),
+		msgCh:       make(chan *msgLog, chanSize),
 	}
-	defer conn.Close()
-	if a != nil {
-		return conn.Logs(a.Name).DropCollection()
+	for i := 0; i < numberGoroutines; i++ {
+		go d.runWriter()
 	}
-	colls, err := conn.LogsCollections()
-	if err != nil {
-		return err
-	}
-	for _, coll := range colls {
-		err = coll.DropCollection()
-		if err != nil {
-			log.Errorf("Error trying to drop collection %s", coll.Name)
+	return d
+}
+
+func (d *logDispatcher) runWriter() {
+	notifyMessages := make([]interface{}, 1)
+	for msgWithDispatcher := range d.msgCh {
+		notifyMessages[0] = msgWithDispatcher.msg
+		notify(msgWithDispatcher.msg.AppName, notifyMessages)
+		select {
+		case msgWithDispatcher.dispatcher.toFlush <- msgWithDispatcher.msg:
+		case <-msgWithDispatcher.dispatcher.done:
+			return
 		}
+	}
+}
+
+func (d *logDispatcher) Send(msg *Applog) error {
+	appName := msg.AppName
+	appD, ok := d.dispatchers[appName]
+	if !ok {
+		appD = newAppLogDispatcher(appName)
+		d.dispatchers[appName] = appD
+	}
+	msgWithDispatcher := &msgLog{dispatcher: appD, msg: msg}
+	select {
+	case d.msgCh <- msgWithDispatcher:
+	case err := <-appD.errCh:
+		delete(d.dispatchers, appName)
+		return err
 	}
 	return nil
 }
 
-func LogReceiver() (chan<- *Applog, <-chan error) {
-	ch := make(chan *Applog)
-	errCh := make(chan error)
-	go func() {
-		collMap := map[string]*storage.Collection{}
-		messages := make([]interface{}, 1)
-		for msg := range ch {
-			messages[0] = msg
-			notify(msg.AppName, messages)
-			coll := collMap[msg.AppName]
-			if coll == nil {
-				conn, err := db.LogConn()
-				if err != nil {
-					errCh <- err
-					break
-				}
-				coll = conn.Logs(msg.AppName)
-				collMap[msg.AppName] = coll
+func (d *logDispatcher) Stop() error {
+	var finalErr error
+	for appName, appD := range d.dispatchers {
+		delete(d.dispatchers, appName)
+		close(appD.done)
+		err := <-appD.errCh
+		if err != nil {
+			if finalErr == nil {
+				finalErr = err
+			} else {
+				finalErr = fmt.Errorf("%s, %s", finalErr, err)
 			}
-			err := coll.Insert(msg)
+		}
+	}
+	close(d.msgCh)
+	return finalErr
+}
+
+type appLogDispatcher struct {
+	appName string
+	errCh   chan error
+	done    chan bool
+	toFlush chan *Applog
+}
+
+func newAppLogDispatcher(appName string) *appLogDispatcher {
+	d := &appLogDispatcher{
+		appName: appName,
+		errCh:   make(chan error),
+		done:    make(chan bool),
+		toFlush: make(chan *Applog),
+	}
+	go d.runFlusher()
+	return d
+}
+
+func (d *appLogDispatcher) runFlusher() {
+	defer close(d.errCh)
+	t := time.NewTimer(bulkMaxWaitTime)
+	pos := 0
+	sz := 200
+	bulkBuffer := make([]interface{}, sz)
+	for {
+		var flush bool
+		select {
+		case <-d.done:
+			return
+		case msg := <-d.toFlush:
+			bulkBuffer[pos] = msg
+			pos++
+			flush = sz == pos
+			if flush {
+				t.Stop()
+			} else {
+				t.Reset(bulkMaxWaitTime)
+			}
+		case <-t.C:
+			flush = pos > 0
+		}
+		if flush {
+			conn, err := db.LogConn()
 			if err != nil {
-				errCh <- err
-				break
+				d.errCh <- err
+				return
 			}
-		}
-		for _, coll := range collMap {
+			coll := conn.Logs(d.appName)
+			err = coll.Insert(bulkBuffer[:pos]...)
 			coll.Close()
+			if err != nil {
+				d.errCh <- err
+				return
+			}
+			pos = 0
 		}
-		close(errCh)
-	}()
-	return ch, errCh
+	}
 }

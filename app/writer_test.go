@@ -1,4 +1,4 @@
-// Copyright 2015 tsuru authors. All rights reserved.
+// Copyright 2016 tsuru authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -30,6 +30,11 @@ func (s *WriterSuite) SetUpSuite(c *check.C) {
 
 func (s *WriterSuite) SetUpTest(c *check.C) {
 	dbtest.ClearAllCollections(s.conn.Apps().Database)
+}
+
+func (s *WriterSuite) TearDownSuite(c *check.C) {
+	s.conn.Apps().Database.DropDatabase()
+	s.conn.Close()
 }
 
 func (s *WriterSuite) TestLogWriter(c *check.C) {
@@ -139,6 +144,28 @@ func (s *WriterSuite) TestLogWriterAsyncCopySlice(c *check.C) {
 	for i := 0; i < 100; i++ {
 		c.Assert(logs[i].Message, check.Equals, "ble")
 		c.Assert(logs[i].Source, check.Equals, "tsuru")
+	}
+}
+
+func (s *WriterSuite) TestLogWriterAsyncCloseWritingStress(c *check.C) {
+	a := App{Name: "down"}
+	err := s.conn.Apps().Insert(a)
+	c.Assert(err, check.IsNil)
+	writeFn := func(writer *LogWriter) {
+		for i := 0; i < 100; i++ {
+			data := []byte("ble")
+			_, err := writer.Write(data)
+			c.Assert(err, check.IsNil)
+		}
+	}
+	for i := 0; i < 100; i++ {
+		writer := LogWriter{App: &a}
+		writer.Async()
+		go writeFn(&writer)
+		go writeFn(&writer)
+		go writer.Close()
+		err := writer.Wait(time.Second)
+		c.Assert(err, check.IsNil)
 	}
 }
 

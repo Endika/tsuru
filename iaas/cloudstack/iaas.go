@@ -161,7 +161,7 @@ func (i *CloudstackIaaS) CreateMachine(params map[string]string) (*iaas.Machine,
 		paramsCopy[k] = v
 	}
 	if userData != "" {
-		paramsCopy["userdata"] = userData
+		paramsCopy["userdata"] = base64.StdEncoding.EncodeToString([]byte(userData))
 	}
 	var vmStatus DeployVirtualMachineResponse
 	err = i.do("deployVirtualMachine", paramsCopy, &vmStatus)
@@ -177,6 +177,7 @@ func (i *CloudstackIaaS) CreateMachine(params map[string]string) (*iaas.Machine,
 	job, err := q.EnqueueWait(i.taskName(machineCreateTaskName), monsterqueue.JobParams{
 		"jobId":     vmStatus.DeployVirtualMachineResponse.JobID,
 		"vmId":      vmStatus.DeployVirtualMachineResponse.ID,
+		"tags":      params["tags"],
 		"projectId": params["projectid"],
 	}, waitDuration)
 	if err != nil {

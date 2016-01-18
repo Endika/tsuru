@@ -1,4 +1,4 @@
-// Copyright 2015 tsuru authors. All rights reserved.
+// Copyright 2016 tsuru authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -21,6 +21,7 @@ import (
 	"github.com/tsuru/tsuru/db"
 	"github.com/tsuru/tsuru/errors"
 	"github.com/tsuru/tsuru/log"
+	"github.com/tsuru/tsuru/permission"
 	"github.com/tsuru/tsuru/provision"
 	"github.com/tsuru/tsuru/quota"
 	"github.com/tsuru/tsuru/repository"
@@ -89,6 +90,7 @@ type App struct {
 	Lock           AppLock
 	Plan           Plan
 	Pool           string
+	Description    string
 
 	quota.Quota
 }
@@ -115,6 +117,7 @@ func (app *App) MarshalJSON() ([]byte, error) {
 	result["cname"] = app.CName
 	result["owner"] = app.Owner
 	result["pool"] = app.Pool
+	result["description"] = app.Description
 	result["deploys"] = app.Deploys
 	result["teamowner"] = app.TeamOwner
 	result["plan"] = app.Plan
@@ -208,21 +211,8 @@ func GetByName(name string) (*App, error) {
 //       2. Create the git repository using the repository manager
 //       3. Provision the app using the provisioner
 func CreateApp(app *App, user *auth.User) error {
-	teams, err := user.Teams()
-	if err != nil {
-		return err
-	}
-	if len(teams) == 0 {
-		return NoTeamsError{}
-	}
-	platform, err := getPlatform(app.Platform)
-	if err != nil {
-		return err
-	}
-	if platform.Disabled && !user.IsAdmin() {
-		return InvalidPlatformError{}
-	}
 	var plan *Plan
+	var err error
 	if app.Plan.Name == "" {
 		plan, err = DefaultPlan()
 	} else {
@@ -231,13 +221,7 @@ func CreateApp(app *App, user *auth.User) error {
 	if err != nil {
 		return err
 	}
-	if app.TeamOwner == "" {
-		if len(teams) > 1 {
-			return ManyTeamsError{}
-		}
-		app.TeamOwner = teams[0].Name
-	}
-	err = app.ValidateTeamOwner(user)
+	err = app.validateTeamOwner()
 	if err != nil {
 		return err
 	}
@@ -266,6 +250,16 @@ func CreateApp(app *App, user *auth.User) error {
 		return &AppCreationError{app: app.Name, Err: err}
 	}
 	return nil
+}
+
+// Update changes informations of the application.
+func (app *App) Update() error {
+	conn, err := db.Conn()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	return conn.Apps().Update(bson.M{"name": app.Name}, app)
 }
 
 // ChangePlan changes the plan of the application.
@@ -304,7 +298,7 @@ func (app *App) unbind() error {
 		msg += fmt.Sprintf("- %s (%s)", instanceName, reason.Error())
 	}
 	for _, instance := range instances {
-		err = instance.UnbindApp(app, nil)
+		err = instance.UnbindApp(app, true, nil)
 		if err != nil {
 			addMsg(instance.Name, err)
 		}
@@ -486,7 +480,7 @@ func (app *App) SetUnitStatus(unitName string, status provision.Status) error {
 			return Provisioner.SetUnitStatus(unit, status)
 		}
 	}
-	return provision.ErrUnitNotFound
+	return &provision.UnitNotFoundError{ID: unitName}
 }
 
 type UpdateUnitsData struct {
@@ -507,11 +501,9 @@ func UpdateUnitsStatus(units []UpdateUnitsData) ([]UpdateUnitsResult, error) {
 	for i, unitData := range units {
 		unit := provision.Unit{ID: unitData.ID, Name: unitData.Name}
 		err := Provisioner.SetUnitStatus(unit, unitData.Status)
-		result[i] = UpdateUnitsResult{
-			ID:    unitData.ID,
-			Found: err != provision.ErrUnitNotFound,
-		}
-		if err != nil && err != provision.ErrUnitNotFound {
+		_, ok := err.(*provision.UnitNotFoundError)
+		result[i] = UpdateUnitsResult{ID: unitData.ID, Found: !ok}
+		if err != nil && !ok {
 			return nil, err
 		}
 	}
@@ -557,8 +549,16 @@ func (app *App) Grant(team *auth.Team) error {
 	if err != nil {
 		return err
 	}
-	for _, user := range team.Users {
-		err = repository.Manager().GrantAccess(app.Name, user)
+	users, err := auth.ListUsersWithPermissions(permission.Permission{
+		Scheme:  permission.PermAppDeploy,
+		Context: permission.Context(permission.CtxTeam, team.Name),
+	})
+	if err != nil {
+		conn.Apps().Update(bson.M{"name": app.Name}, bson.M{"$pull": bson.M{"teams": team.Name}})
+		return err
+	}
+	for _, user := range users {
+		err = repository.Manager().GrantAccess(app.Name, user.Email)
 		if err != nil {
 			conn.Apps().Update(bson.M{"name": app.Name}, bson.M{"$pull": bson.M{"teams": team.Name}})
 			return err
@@ -589,33 +589,36 @@ func (app *App) Revoke(team *auth.Team) error {
 	if err != nil {
 		return err
 	}
-	for _, user := range app.usersToRevoke(team) {
-		err = repository.Manager().RevokeAccess(app.Name, user)
+	users, err := auth.ListUsersWithPermissions(permission.Permission{
+		Scheme:  permission.PermAppDeploy,
+		Context: permission.Context(permission.CtxTeam, team.Name),
+	})
+	if err != nil {
+		conn.Apps().Update(bson.M{"name": app.Name}, bson.M{"$addToSet": bson.M{"teams": team.Name}})
+		return err
+	}
+	for _, user := range users {
+		perms, err := user.Permissions()
+		if err != nil {
+			conn.Apps().Update(bson.M{"name": app.Name}, bson.M{"$addToSet": bson.M{"teams": team.Name}})
+			return err
+		}
+		canDeploy := permission.CheckFromPermList(perms, permission.PermAppDeploy,
+			append(permission.Contexts(permission.CtxTeam, app.Teams),
+				permission.Context(permission.CtxApp, app.Name),
+				permission.Context(permission.CtxPool, app.Pool),
+			)...,
+		)
+		if canDeploy {
+			continue
+		}
+		err = repository.Manager().RevokeAccess(app.Name, user.Email)
 		if err != nil {
 			conn.Apps().Update(bson.M{"name": app.Name}, bson.M{"$addToSet": bson.M{"teams": team.Name}})
 			return err
 		}
 	}
 	return nil
-}
-
-func (app *App) usersToRevoke(t *auth.Team) []string {
-	teams := app.GetTeams()
-	users := make([]string, 0, len(t.Users))
-	for _, email := range t.Users {
-		found := false
-		user := auth.User{Email: email}
-		for _, team := range teams {
-			if team.ContainsUser(&user) {
-				found = true
-				break
-			}
-		}
-		if !found {
-			users = append(users, email)
-		}
-	}
-	return users
 }
 
 // GetTeams returns a slice of teams that have access to the app.
@@ -634,7 +637,7 @@ func (app *App) GetTeams() []auth.Team {
 // SetTeamOwner sets the TeamOwner value.
 func (app *App) SetTeamOwner(team *auth.Team, u *auth.User) error {
 	app.TeamOwner = team.Name
-	err := app.ValidateTeamOwner(u)
+	err := app.validateTeamOwner()
 	if err != nil {
 		return err
 	}
@@ -651,24 +654,9 @@ func (app *App) SetTeamOwner(team *auth.Team, u *auth.User) error {
 	return nil
 }
 
-func (app *App) ValidateTeamOwner(user *auth.User) error {
-	if _, err := auth.GetTeam(app.TeamOwner); err == auth.ErrTeamNotFound {
-		return err
-	}
-	if user.IsAdmin() {
-		return nil
-	}
-	teams, err := user.Teams()
-	if err != nil {
-		return err
-	}
-	for _, t := range teams {
-		if t.Name == app.TeamOwner {
-			return nil
-		}
-	}
-	errorMsg := fmt.Sprintf("You can not set %s team as app's owner. Please set one of your teams as app's owner.", app.TeamOwner)
-	return stderr.New(errorMsg)
+func (app *App) validateTeamOwner() error {
+	_, err := auth.GetTeam(app.TeamOwner)
+	return err
 }
 
 func (app *App) SetPool() error {
@@ -919,13 +907,10 @@ func (app *App) GetQuota() quota.Quota {
 }
 
 func (app *App) SetQuotaInUse(inUse int) error {
-	if app.Quota.Unlimited() {
-		return stderr.New("cannot set quota usage for unlimited quota")
-	}
 	if inUse < 0 {
 		return stderr.New("invalid value, cannot be lesser than 0")
 	}
-	if inUse > app.Quota.Limit {
+	if !app.Quota.Unlimited() && inUse > app.Quota.Limit {
 		return &quota.QuotaExceededError{
 			Requested: uint(inUse),
 			Available: uint(app.Quota.Limit),
@@ -961,15 +946,16 @@ func (app *App) Envs() map[string]bind.EnvVar {
 // SetEnvs saves a list of environment variables in the app. The publicOnly
 // parameter indicates whether only public variables can be overridden (if set
 // to false, SetEnvs may override a private variable).
-func (app *App) SetEnvs(envs []bind.EnvVar, publicOnly bool, w io.Writer) error {
+func (app *App) SetEnvs(setEnvs bind.SetEnvApp, w io.Writer) error {
 	units, err := app.GetUnits()
 	if err != nil {
 		return err
 	}
 	if len(units) > 0 {
-		return app.setEnvsToApp(envs, publicOnly, true, w)
+		return app.setEnvsToApp(setEnvs, w)
 	}
-	return app.setEnvsToApp(envs, publicOnly, false, w)
+	setEnvs.ShouldRestart = false
+	return app.setEnvsToApp(setEnvs, w)
 }
 
 // setEnvsToApp adds environment variables to an app, serializing the resulting
@@ -981,16 +967,16 @@ func (app *App) SetEnvs(envs []bind.EnvVar, publicOnly bool, w io.Writer) error 
 // overridden (if set to false, setEnvsToApp may override a private variable).
 //
 // shouldRestart defines if the server should be restarted after saving vars.
-func (app *App) setEnvsToApp(envs []bind.EnvVar, publicOnly, shouldRestart bool, w io.Writer) error {
-	if len(envs) == 0 {
+func (app *App) setEnvsToApp(setEnvs bind.SetEnvApp, w io.Writer) error {
+	if len(setEnvs.Envs) == 0 {
 		return nil
 	}
 	if w != nil {
-		fmt.Fprintf(w, "---- Setting %d new environment variables ----\n", len(envs))
+		fmt.Fprintf(w, "---- Setting %d new environment variables ----\n", len(setEnvs.Envs))
 	}
-	for _, env := range envs {
+	for _, env := range setEnvs.Envs {
 		set := true
-		if publicOnly {
+		if setEnvs.PublicOnly {
 			e, err := app.getEnv(env.Name)
 			if err == nil && !e.Public && e.InstanceName != "" {
 				set = false
@@ -1009,7 +995,7 @@ func (app *App) setEnvsToApp(envs []bind.EnvVar, publicOnly, shouldRestart bool,
 	if err != nil {
 		return err
 	}
-	if !shouldRestart {
+	if !setEnvs.ShouldRestart {
 		return nil
 	}
 	return Provisioner.Restart(app, "", w)
@@ -1021,28 +1007,29 @@ func (app *App) setEnvsToApp(envs []bind.EnvVar, publicOnly, shouldRestart bool,
 // Besides the slice with the name of the variables, this method also takes the
 // parameter publicOnly, which indicates whether only public variables can be
 // overridden (if set to false, setEnvsToApp may override a private variable).
-func (app *App) UnsetEnvs(variableNames []string, publicOnly bool, w io.Writer) error {
+func (app *App) UnsetEnvs(unsetEnvs bind.UnsetEnvApp, w io.Writer) error {
 	units, err := app.GetUnits()
 	if err != nil {
 		return err
 	}
 	if len(units) > 0 {
-		return app.unsetEnvsToApp(variableNames, publicOnly, true, w)
+		return app.unsetEnvsToApp(unsetEnvs, w)
 	}
-	return app.unsetEnvsToApp(variableNames, publicOnly, false, w)
+	unsetEnvs.ShouldRestart = false
+	return app.unsetEnvsToApp(unsetEnvs, w)
 }
 
-func (app *App) unsetEnvsToApp(variableNames []string, publicOnly, shouldRestart bool, w io.Writer) error {
-	if len(variableNames) == 0 {
+func (app *App) unsetEnvsToApp(unsetEnvs bind.UnsetEnvApp, w io.Writer) error {
+	if len(unsetEnvs.VariableNames) == 0 {
 		return nil
 	}
 	if w != nil {
-		fmt.Fprintf(w, "---- Unsetting %d environment variables ----\n", len(variableNames))
+		fmt.Fprintf(w, "---- Unsetting %d environment variables ----\n", len(unsetEnvs.VariableNames))
 	}
-	for _, name := range variableNames {
+	for _, name := range unsetEnvs.VariableNames {
 		var unset bool
 		e, err := app.getEnv(name)
-		if !publicOnly || (err == nil && e.Public) {
+		if !unsetEnvs.PublicOnly || (err == nil && e.Public) {
 			unset = true
 		}
 		if unset {
@@ -1058,7 +1045,7 @@ func (app *App) unsetEnvsToApp(variableNames []string, publicOnly, shouldRestart
 	if err != nil {
 		return err
 	}
-	if !shouldRestart {
+	if !unsetEnvs.ShouldRestart {
 		return nil
 	}
 	return Provisioner.Restart(app, "", w)
@@ -1150,25 +1137,26 @@ func (app *App) parsedTsuruServices() map[string][]bind.ServiceInstance {
 	return tsuruServices
 }
 
-func (app *App) AddInstance(serviceName string, instance bind.ServiceInstance, writer io.Writer) error {
+//func (app *App) AddInstance(serviceName string, instance bind.ServiceInstance, shouldRestart bool, writer io.Writer) error {
+func (app *App) AddInstance(instanceApp bind.InstanceApp, writer io.Writer) error {
 	tsuruServices := app.parsedTsuruServices()
-	serviceInstances := tsuruServices[serviceName]
-	serviceInstances = append(serviceInstances, instance)
-	tsuruServices[serviceName] = serviceInstances
+	serviceInstances := tsuruServices[instanceApp.ServiceName]
+	serviceInstances = append(serviceInstances, instanceApp.Instance)
+	tsuruServices[instanceApp.ServiceName] = serviceInstances
 	servicesJson, err := json.Marshal(tsuruServices)
 	if err != nil {
 		return err
 	}
-	if len(instance.Envs) == 0 {
+	if len(instanceApp.Instance.Envs) == 0 {
 		return nil
 	}
-	envVars := make([]bind.EnvVar, 0, len(instance.Envs)+1)
-	for k, v := range instance.Envs {
+	envVars := make([]bind.EnvVar, 0, len(instanceApp.Instance.Envs)+1)
+	for k, v := range instanceApp.Instance.Envs {
 		envVars = append(envVars, bind.EnvVar{
 			Name:         k,
 			Value:        v,
 			Public:       false,
-			InstanceName: instance.Name,
+			InstanceName: instanceApp.Instance.Name,
 		})
 	}
 	envVars = append(envVars, bind.EnvVar{
@@ -1176,7 +1164,12 @@ func (app *App) AddInstance(serviceName string, instance bind.ServiceInstance, w
 		Value:  string(servicesJson),
 		Public: false,
 	})
-	return app.SetEnvs(envVars, false, writer)
+	return app.SetEnvs(
+		bind.SetEnvApp{
+			Envs:          envVars,
+			PublicOnly:    false,
+			ShouldRestart: instanceApp.ShouldRestart,
+		}, writer)
 }
 
 func findServiceEnv(tsuruServices map[string][]bind.ServiceInstance, name string) (string, string) {
@@ -1190,16 +1183,17 @@ func findServiceEnv(tsuruServices map[string][]bind.ServiceInstance, name string
 	return "", ""
 }
 
-func (app *App) RemoveInstance(serviceName string, instance bind.ServiceInstance, writer io.Writer) error {
+//func (app *App) RemoveInstance(serviceName string, instance bind.ServiceInstance, shouldRestart bool, writer io.Writer) error {
+func (app *App) RemoveInstance(instanceApp bind.InstanceApp, writer io.Writer) error {
 	tsuruServices := app.parsedTsuruServices()
-	toUnsetEnvs := make([]string, 0, len(instance.Envs))
-	for varName := range instance.Envs {
+	toUnsetEnvs := make([]string, 0, len(instanceApp.Instance.Envs))
+	for varName := range instanceApp.Instance.Envs {
 		toUnsetEnvs = append(toUnsetEnvs, varName)
 	}
 	index := -1
-	serviceInstances := tsuruServices[serviceName]
+	serviceInstances := tsuruServices[instanceApp.ServiceName]
 	for i, si := range serviceInstances {
-		if si.Name == instance.Name {
+		if si.Name == instanceApp.Instance.Name {
 			index = i
 			break
 		}
@@ -1210,7 +1204,7 @@ func (app *App) RemoveInstance(serviceName string, instance bind.ServiceInstance
 		for i := index; i < len(serviceInstances)-1; i++ {
 			serviceInstances[i] = serviceInstances[i+1]
 		}
-		tsuruServices[serviceName] = serviceInstances[:len(serviceInstances)-1]
+		tsuruServices[instanceApp.ServiceName] = serviceInstances[:len(serviceInstances)-1]
 		servicesJson, err = json.Marshal(tsuruServices)
 		if err != nil {
 			return err
@@ -1241,13 +1235,26 @@ func (app *App) RemoveInstance(serviceName string, instance bind.ServiceInstance
 		if err != nil {
 			return err
 		}
-		shouldRestart := len(envsToSet) == 0 && len(units) > 0
-		err = app.unsetEnvsToApp(toUnsetEnvs, false, shouldRestart, writer)
+		restart := instanceApp.ShouldRestart
+		if instanceApp.ShouldRestart {
+			restart = len(envsToSet) == 0 && len(units) > 0
+		}
+		err = app.unsetEnvsToApp(
+			bind.UnsetEnvApp{
+				VariableNames: toUnsetEnvs,
+				PublicOnly:    false,
+				ShouldRestart: restart,
+			}, writer)
 		if err != nil {
 			return err
 		}
 	}
-	return app.SetEnvs(envsToSet, false, writer)
+	return app.SetEnvs(
+		bind.SetEnvApp{
+			Envs:          envsToSet,
+			PublicOnly:    false,
+			ShouldRestart: instanceApp.ShouldRestart,
+		}, writer)
 }
 
 // Log adds a log message to the app. Specifying a good source is good so the
@@ -1282,6 +1289,16 @@ func (app *App) Log(message, source, unit string) error {
 // LastLogs returns a list of the last `lines` log of the app, matching the
 // fields in the log instance received as an example.
 func (app *App) LastLogs(lines int, filterLog Applog) ([]Applog, error) {
+	logsProvisioner, ok := Provisioner.(provision.OptionalLogsProvisioner)
+	if ok {
+		enabled, doc, err := logsProvisioner.LogsEnabled(app)
+		if err != nil {
+			return nil, err
+		}
+		if !enabled {
+			return nil, stderr.New(doc)
+		}
+	}
 	conn, err := db.LogConn()
 	if err != nil {
 		return nil, err
@@ -1311,13 +1328,31 @@ type Filter struct {
 	Platform  string
 	TeamOwner string
 	UserOwner string
+	Pool      string
 	Locked    bool
+	Extra     map[string][]string
+}
+
+func (f *Filter) ExtraIn(name string, value string) {
+	if f.Extra == nil {
+		f.Extra = make(map[string][]string)
+	}
+	f.Extra[name] = append(f.Extra[name], value)
 }
 
 func (f *Filter) Query() bson.M {
-	query := bson.M{}
 	if f == nil {
-		return query
+		return bson.M{}
+	}
+	query := bson.M{}
+	if f.Extra != nil {
+		var orBlock []bson.M
+		for field, values := range f.Extra {
+			orBlock = append(orBlock, bson.M{
+				field: bson.M{"$in": values},
+			})
+		}
+		query["$or"] = orBlock
 	}
 	if f.Name != "" {
 		query["name"] = bson.M{"$regex": f.Name}
@@ -1331,19 +1366,17 @@ func (f *Filter) Query() bson.M {
 	if f.UserOwner != "" {
 		query["owner"] = f.UserOwner
 	}
+	if f.Pool != "" {
+		query["pool"] = f.Pool
+	}
 	if f.Locked {
 		query["lock.locked"] = true
 	}
 	return query
 }
 
-// List returns the list of apps that the given user has access to.
-//
-// If the user does not have access to any app, this function returns an empty
-// list and a nil error.
-//
-// The list can be filtered through the filter parameter.
-func List(u *auth.User, filter *Filter) ([]App, error) {
+// List returns the list of apps filtered through the filter parameter.
+func List(filter *Filter) ([]App, error) {
 	var apps []App
 	conn, err := db.Conn()
 	if err != nil {
@@ -1351,18 +1384,6 @@ func List(u *auth.User, filter *Filter) ([]App, error) {
 	}
 	defer conn.Close()
 	query := filter.Query()
-	if u == nil || u.IsAdmin() {
-		if err := conn.Apps().Find(query).All(&apps); err != nil {
-			return []App{}, err
-		}
-		return apps, nil
-	}
-	ts, err := u.Teams()
-	if err != nil {
-		return []App{}, err
-	}
-	teams := auth.GetTeamsNames(ts)
-	query["teams"] = bson.M{"$in": teams}
 	if err := conn.Apps().Find(query).All(&apps); err != nil {
 		return []App{}, err
 	}
@@ -1441,7 +1462,7 @@ func (app *App) RegisterUnit(unitId string, customData map[string]interface{}) e
 			return Provisioner.RegisterUnit(unit, customData)
 		}
 	}
-	return provision.ErrUnitNotFound
+	return &provision.UnitNotFoundError{ID: unitId}
 }
 
 func (app *App) GetRouter() (string, error) {

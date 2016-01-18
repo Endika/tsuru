@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 
 	"gopkg.in/check.v1"
 	"gopkg.in/mgo.v2/bson"
@@ -189,48 +190,7 @@ func (s *S) TestUpdateServiceReturnErrorIfServiceDoesNotExist(c *check.C) {
 	c.Assert(err, check.NotNil)
 }
 
-func (s *S) TestServiceByTeamKindFilteringByOwnerTeamsAndRetrievingNotRestrictedServices(c *check.C) {
-	srvc := Service{Name: "mysql", OwnerTeams: []string{s.team.Name}}
-	err := srvc.Create()
-	c.Assert(err, check.IsNil)
-	srvc2 := Service{Name: "mongodb", IsRestricted: false}
-	err = srvc2.Create()
-	c.Assert(err, check.IsNil)
-	rSrvc, err := GetServicesByTeamKindAndNoRestriction("owner_teams", s.user)
-	c.Assert(err, check.IsNil)
-	expected := []Service{{Name: srvc.Name}, {Name: srvc2.Name}}
-	c.Assert(expected, check.DeepEquals, rSrvc)
-}
-
-func (s *S) TestServiceByTeamKindFilteringByTeamsAndNotRetrieveRestrictedServices(c *check.C) {
-	srvc := Service{Name: "mysql", Teams: []string{s.team.Name}}
-	err := srvc.Create()
-	c.Assert(err, check.IsNil)
-	srvc2 := Service{Name: "mongodb", IsRestricted: true}
-	err = srvc2.Create()
-	c.Assert(err, check.IsNil)
-	rSrvc, err := GetServicesByTeamKindAndNoRestriction("teams", s.user)
-	c.Assert(err, check.IsNil)
-	expected := []Service{{Name: srvc.Name}}
-	c.Assert(expected, check.DeepEquals, rSrvc)
-}
-
-func (s *S) TestServiceByTeamKindShouldNotReturnsDeletedServices(c *check.C) {
-	service := Service{Name: "mysql", Teams: []string{s.team.Name}}
-	err := service.Create()
-	c.Assert(err, check.IsNil)
-	deletedService := Service{Name: "firebird", Teams: []string{s.team.Name}}
-	err = deletedService.Create()
-	c.Assert(err, check.IsNil)
-	err = deletedService.Delete()
-	c.Assert(err, check.IsNil)
-	result, err := GetServicesByTeamKindAndNoRestriction("teams", s.user)
-	c.Assert(err, check.IsNil)
-	expected := []Service{{Name: service.Name}}
-	c.Assert(expected, check.DeepEquals, result)
-}
-
-func (s *S) TestGetServicesByOwnerTeams(c *check.C) {
+func (s *S) TestGetServicesByOwnerTeamsAndServices(c *check.C) {
 	srvc := Service{Name: "mongodb", OwnerTeams: []string{s.team.Name}, Endpoint: map[string]string{}, Teams: []string{}}
 	err := srvc.Create()
 	c.Assert(err, check.IsNil)
@@ -239,12 +199,31 @@ func (s *S) TestGetServicesByOwnerTeams(c *check.C) {
 	err = srvc2.Create()
 	c.Assert(err, check.IsNil)
 	defer srvc2.Delete()
-	services, err := GetServicesByOwnerTeams("owner_teams", s.user)
+	services, err := GetServicesByOwnerTeamsAndServices([]string{s.team.Name}, nil)
+	c.Assert(err, check.IsNil)
 	expected := []Service{srvc}
 	c.Assert(services, check.DeepEquals, expected)
 }
 
-func (s *S) TestGetServicesByOwnerTeamsShouldNotReturnsDeletedServices(c *check.C) {
+func (s *S) TestGetServicesByOwnerTeamsAndServicesWithServices(c *check.C) {
+	srvc := Service{Name: "mongodb", OwnerTeams: []string{s.team.Name}, Endpoint: map[string]string{}, Teams: []string{}}
+	err := srvc.Create()
+	c.Assert(err, check.IsNil)
+	srvc2 := Service{Name: "mysql", Teams: []string{s.team.Name}}
+	err = srvc2.Create()
+	c.Assert(err, check.IsNil)
+	services, err := GetServicesByOwnerTeamsAndServices([]string{s.team.Name}, []string{srvc2.Name})
+	c.Assert(err, check.IsNil)
+	c.Assert(services, check.HasLen, 2)
+	var names []string
+	for _, s := range services {
+		names = append(names, s.Name)
+	}
+	sort.Strings(names)
+	c.Assert(names, check.DeepEquals, []string{"mongodb", "mysql"})
+}
+
+func (s *S) TestGetServicesByOwnerTeamsAndServicesShouldNotReturnsDeletedServices(c *check.C) {
 	service := Service{Name: "mysql", OwnerTeams: []string{s.team.Name}, Endpoint: map[string]string{}, Teams: []string{}}
 	err := service.Create()
 	c.Assert(err, check.IsNil)
@@ -252,7 +231,9 @@ func (s *S) TestGetServicesByOwnerTeamsShouldNotReturnsDeletedServices(c *check.
 	err = deletedService.Create()
 	c.Assert(err, check.IsNil)
 	err = deletedService.Delete()
-	services, err := GetServicesByOwnerTeams("owner_teams", s.user)
+	services, err := GetServicesByOwnerTeamsAndServices([]string{s.team.Name}, nil)
+	c.Assert(err, check.IsNil)
+	c.Assert(err, check.IsNil)
 	expected := []Service{service}
 	c.Assert(services, check.DeepEquals, expected)
 }
@@ -268,10 +249,12 @@ func (s *S) TestServiceModelMarshalJSON(c *check.C) {
 	expected[0] = map[string]interface{}{
 		"service":   "mysql",
 		"instances": nil,
+		"plans":     nil,
 	}
 	expected[1] = map[string]interface{}{
 		"service":   "mongo",
 		"instances": nil,
+		"plans":     nil,
 	}
 	result := make([]map[string]interface{}, 2)
 	err = json.Unmarshal(data, &result)

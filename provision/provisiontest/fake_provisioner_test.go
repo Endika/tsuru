@@ -1,4 +1,4 @@
-// Copyright 2015 tsuru authors. All rights reserved.
+// Copyright 2016 tsuru authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -10,6 +10,7 @@ import (
 	"io/ioutil"
 	"testing"
 
+	"github.com/tsuru/config"
 	"github.com/tsuru/tsuru/app/bind"
 	"github.com/tsuru/tsuru/provision"
 	"github.com/tsuru/tsuru/quota"
@@ -24,6 +25,11 @@ func Test(t *testing.T) {
 type S struct{}
 
 var _ = check.Suite(&S{})
+
+func (s *S) SetUpSuite(c *check.C) {
+	config.Set("database:url", "127.0.0.1:27017")
+	config.Set("database:name", "fake_provision_tests_s")
+}
 
 func (s *S) SetUpTest(c *check.C) {
 	routertest.FakeRouter.Reset()
@@ -85,7 +91,12 @@ func (s *S) TestSetEnvs(c *check.C) {
 			Public: true,
 		},
 	}
-	app.SetEnvs(envs, false, nil)
+	app.SetEnvs(
+		bind.SetEnvApp{
+			Envs:          envs,
+			PublicOnly:    false,
+			ShouldRestart: true,
+		}, nil)
 	expected := map[string]bind.EnvVar{
 		"http_proxy": {
 			Name:   "http_proxy",
@@ -119,7 +130,12 @@ func (s *S) TestUnsetEnvs(c *check.C) {
 		Public: true,
 	}
 	app.SetEnv(env)
-	app.UnsetEnvs([]string{"http_proxy"}, false, nil)
+	app.UnsetEnvs(
+		bind.UnsetEnvApp{
+			VariableNames: []string{"http_proxy"},
+			PublicOnly:    false,
+			ShouldRestart: true,
+		}, nil)
 	c.Assert(app.env, check.DeepEquals, map[string]bind.EnvVar{})
 }
 
@@ -189,9 +205,19 @@ func (s *S) TestFakeAppAddInstance(c *check.C) {
 	instance1 := bind.ServiceInstance{Name: "inst1"}
 	instance2 := bind.ServiceInstance{Name: "inst2"}
 	app := NewFakeApp("sou", "otm", 0)
-	err := app.AddInstance("mysql", instance1, nil)
+	err := app.AddInstance(
+		bind.InstanceApp{
+			ServiceName:   "mysql",
+			Instance:      instance1,
+			ShouldRestart: true,
+		}, nil)
 	c.Assert(err, check.IsNil)
-	err = app.AddInstance("mongodb", instance2, nil)
+	err = app.AddInstance(
+		bind.InstanceApp{
+			ServiceName:   "mongodb",
+			Instance:      instance2,
+			ShouldRestart: false,
+		}, nil)
 	c.Assert(err, check.IsNil)
 	instances := app.GetInstances("mysql")
 	c.Assert(instances, check.DeepEquals, []bind.ServiceInstance{instance1})
@@ -205,9 +231,24 @@ func (s *S) TestFakeAppRemoveInstance(c *check.C) {
 	instance1 := bind.ServiceInstance{Name: "inst1"}
 	instance2 := bind.ServiceInstance{Name: "inst2"}
 	app := NewFakeApp("sou", "otm", 0)
-	app.AddInstance("mysql", instance1, nil)
-	app.AddInstance("mongodb", instance2, nil)
-	err := app.RemoveInstance("mysql", instance1, nil)
+	app.AddInstance(
+		bind.InstanceApp{
+			ServiceName:   "mysql",
+			Instance:      instance1,
+			ShouldRestart: true,
+		}, nil)
+	app.AddInstance(
+		bind.InstanceApp{
+			ServiceName:   "mongodb",
+			Instance:      instance2,
+			ShouldRestart: false,
+		}, nil)
+	err := app.RemoveInstance(
+		bind.InstanceApp{
+			ServiceName:   "mysql",
+			Instance:      instance1,
+			ShouldRestart: true,
+		}, nil)
 	c.Assert(err, check.IsNil)
 	instances := app.GetInstances("mysql")
 	c.Assert(instances, check.HasLen, 0)
@@ -219,15 +260,30 @@ func (s *S) TestFakeAppRemoveInstanceNotFound(c *check.C) {
 	instance1 := bind.ServiceInstance{Name: "inst1"}
 	instance2 := bind.ServiceInstance{Name: "inst2"}
 	app := NewFakeApp("sou", "otm", 0)
-	app.AddInstance("mysql", instance1, nil)
-	err := app.RemoveInstance("mysql", instance2, nil)
+	app.AddInstance(
+		bind.InstanceApp{
+			ServiceName:   "mysql",
+			Instance:      instance1,
+			ShouldRestart: true,
+		}, nil)
+	err := app.RemoveInstance(
+		bind.InstanceApp{
+			ServiceName:   "mysql",
+			Instance:      instance2,
+			ShouldRestart: true,
+		}, nil)
 	c.Assert(err.Error(), check.Equals, "instance not found")
 }
 
 func (s *S) TestFakeAppRemoveInstanceServiceNotFound(c *check.C) {
 	instance := bind.ServiceInstance{Name: "inst1"}
 	app := NewFakeApp("sou", "otm", 0)
-	err := app.RemoveInstance("mysql", instance, nil)
+	err := app.RemoveInstance(
+		bind.InstanceApp{
+			ServiceName:   "mysql",
+			Instance:      instance,
+			ShouldRestart: true,
+		}, nil)
 	c.Assert(err.Error(), check.Equals, "instance not found")
 }
 
@@ -247,7 +303,8 @@ func (s *S) TestFakeAppHasLog(c *check.C) {
 func (s *S) TestProvisioned(c *check.C) {
 	app := NewFakeApp("red-sector", "rush", 1)
 	p := NewFakeProvisioner()
-	p.Provision(app)
+	err := p.Provision(app)
+	c.Assert(err, check.IsNil)
 	c.Assert(p.Provisioned(app), check.Equals, true)
 	otherapp := *app
 	otherapp.name = "blue-sector"
@@ -326,19 +383,6 @@ func (s *S) TestGetUnits(c *check.C) {
 	c.Assert(units, check.DeepEquals, list)
 }
 
-func (s *S) TestVersion(c *check.C) {
-	var buf bytes.Buffer
-	app := NewFakeApp("free", "matos", 1)
-	p := NewFakeProvisioner()
-	p.Provision(app)
-	_, err := p.GitDeploy(app, "master", &buf)
-	c.Assert(err, check.IsNil)
-	c.Assert(p.Version(app), check.Equals, "master")
-	_, err = p.GitDeploy(app, "1.0", &buf)
-	c.Assert(err, check.IsNil)
-	c.Assert(p.Version(app), check.Equals, "1.0")
-}
-
 func (s *S) TestPrepareOutput(c *check.C) {
 	output := []byte("the body eletric")
 	p := NewFakeProvisioner()
@@ -354,36 +398,6 @@ func (s *S) TestPrepareFailure(c *check.C) {
 	got := <-p.failures
 	c.Assert(got.method, check.Equals, "Rush")
 	c.Assert(got.err.Error(), check.Equals, "the body eletric")
-}
-
-func (s *S) TestGitDeploy(c *check.C) {
-	var buf bytes.Buffer
-	app := NewFakeApp("soul", "arch", 1)
-	p := NewFakeProvisioner()
-	p.Provision(app)
-	_, err := p.GitDeploy(app, "1.0", &buf)
-	c.Assert(err, check.IsNil)
-	c.Assert(buf.String(), check.Equals, "Git deploy called")
-	c.Assert(p.apps[app.GetName()].version, check.Equals, "1.0")
-}
-
-func (s *S) TestGitDeployUnknownApp(c *check.C) {
-	var buf bytes.Buffer
-	app := NewFakeApp("soul", "arch", 1)
-	p := NewFakeProvisioner()
-	_, err := p.GitDeploy(app, "1.0", &buf)
-	c.Assert(err, check.Equals, errNotProvisioned)
-}
-
-func (s *S) TestGitDeployWithPreparedFailure(c *check.C) {
-	var buf bytes.Buffer
-	err := errors.New("not really")
-	app := NewFakeApp("soul", "arch", 1)
-	p := NewFakeProvisioner()
-	p.PrepareFailure("GitDeploy", err)
-	_, e := p.GitDeploy(app, "1.0", &buf)
-	c.Assert(e, check.NotNil)
-	c.Assert(e, check.Equals, err)
 }
 
 func (s *S) TestArchiveDeploy(c *check.C) {
@@ -629,8 +643,9 @@ func (s *S) TestRemoveUnits(c *check.C) {
 func (s *S) TestRemoveUnitsDifferentProcesses(c *check.C) {
 	app := NewFakeApp("hemispheres", "rush", 0)
 	p := NewFakeProvisioner()
-	p.Provision(app)
-	_, err := p.AddUnits(app, 5, "p1", nil)
+	err := p.Provision(app)
+	c.Assert(err, check.IsNil)
+	_, err = p.AddUnits(app, 5, "p1", nil)
 	c.Assert(err, check.IsNil)
 	_, err = p.AddUnits(app, 2, "p2", nil)
 	c.Assert(err, check.IsNil)
@@ -651,8 +666,9 @@ func (s *S) TestRemoveUnitsDifferentProcesses(c *check.C) {
 func (s *S) TestRemoveUnitsTooManyUnits(c *check.C) {
 	app := NewFakeApp("hemispheres", "rush", 0)
 	p := NewFakeProvisioner()
-	p.Provision(app)
-	_, err := p.AddUnits(app, 1, "web", nil)
+	err := p.Provision(app)
+	c.Assert(err, check.IsNil)
+	_, err = p.AddUnits(app, 1, "web", nil)
 	c.Assert(err, check.IsNil)
 	err = p.RemoveUnits(app, 3, "web", nil)
 	c.Assert(err, check.NotNil)
@@ -662,8 +678,9 @@ func (s *S) TestRemoveUnitsTooManyUnits(c *check.C) {
 func (s *S) TestRemoveUnitsTooManyUnitsOfProcess(c *check.C) {
 	app := NewFakeApp("hemispheres", "rush", 0)
 	p := NewFakeProvisioner()
-	p.Provision(app)
-	_, err := p.AddUnits(app, 1, "web", nil)
+	err := p.Provision(app)
+	c.Assert(err, check.IsNil)
+	_, err = p.AddUnits(app, 1, "web", nil)
 	c.Assert(err, check.IsNil)
 	_, err = p.AddUnits(app, 4, "worker", nil)
 	c.Assert(err, check.IsNil)
@@ -753,8 +770,9 @@ func (s *S) TestAddrFailure(c *check.C) {
 func (s *S) TestSetCName(c *check.C) {
 	app := NewFakeApp("jean", "mj", 0)
 	p := NewFakeProvisioner()
-	p.Provision(app)
-	err := p.SetCName(app, "cname.com")
+	err := p.Provision(app)
+	c.Assert(err, check.IsNil)
+	err = p.SetCName(app, "cname.com")
 	c.Assert(err, check.IsNil)
 	c.Assert(p.apps[app.GetName()].cnames, check.DeepEquals, []string{"cname.com"})
 	c.Assert(routertest.FakeRouter.HasCName("cname.com"), check.Equals, true)
@@ -779,8 +797,9 @@ func (s *S) TestSetCNameFailure(c *check.C) {
 func (s *S) TestUnsetCName(c *check.C) {
 	app := NewFakeApp("jean", "mj", 0)
 	p := NewFakeProvisioner()
-	p.Provision(app)
-	err := p.SetCName(app, "cname.com")
+	err := p.Provision(app)
+	c.Assert(err, check.IsNil)
+	err = p.SetCName(app, "cname.com")
 	c.Assert(err, check.IsNil)
 	c.Assert(p.apps[app.GetName()].cnames, check.DeepEquals, []string{"cname.com"})
 	c.Assert(routertest.FakeRouter.HasCName("cname.com"), check.Equals, true)
@@ -809,8 +828,9 @@ func (s *S) TestUnsetCNameFailure(c *check.C) {
 func (s *S) TestHasCName(c *check.C) {
 	app := NewFakeApp("jean", "mj", 0)
 	p := NewFakeProvisioner()
-	p.Provision(app)
-	err := p.SetCName(app, "cname.com")
+	err := p.Provision(app)
+	c.Assert(err, check.IsNil)
+	err = p.SetCName(app, "cname.com")
 	c.Assert(err, check.IsNil)
 	c.Assert(p.HasCName(app, "cname.com"), check.Equals, true)
 	err = p.UnsetCName(app, "cname.com")
@@ -834,7 +854,7 @@ func (s *S) TestExecuteCommandOnce(c *check.C) {
 func (s *S) TestExtensiblePlatformAdd(c *check.C) {
 	p := ExtensibleFakeProvisioner{FakeProvisioner: NewFakeProvisioner()}
 	args := map[string]string{"dockerfile": "mydockerfile.txt"}
-	err := p.PlatformAdd("python", args, nil)
+	err := p.PlatformAdd(provision.PlatformOptions{Name: "python", Args: args})
 	c.Assert(err, check.IsNil)
 	platform := p.GetPlatform("python")
 	c.Assert(platform.Name, check.Equals, "python")
@@ -845,9 +865,9 @@ func (s *S) TestExtensiblePlatformAdd(c *check.C) {
 func (s *S) TestExtensiblePlatformAddTwice(c *check.C) {
 	p := ExtensibleFakeProvisioner{FakeProvisioner: NewFakeProvisioner()}
 	args := map[string]string{"dockerfile": "mydockerfile.txt"}
-	err := p.PlatformAdd("python", args, nil)
+	err := p.PlatformAdd(provision.PlatformOptions{Name: "python", Args: args})
 	c.Assert(err, check.IsNil)
-	err = p.PlatformAdd("python", nil, nil)
+	err = p.PlatformAdd(provision.PlatformOptions{Name: "python", Args: nil})
 	c.Assert(err, check.NotNil)
 	c.Assert(err.Error(), check.Equals, "duplicate platform")
 }
@@ -855,10 +875,10 @@ func (s *S) TestExtensiblePlatformAddTwice(c *check.C) {
 func (s *S) TestExtensiblePlatformUpdate(c *check.C) {
 	p := ExtensibleFakeProvisioner{FakeProvisioner: NewFakeProvisioner()}
 	args := map[string]string{"dockerfile": "mydockerfile.txt"}
-	err := p.PlatformAdd("python", args, nil)
+	err := p.PlatformAdd(provision.PlatformOptions{Name: "python", Args: args})
 	c.Assert(err, check.IsNil)
 	args["something"] = "wat"
-	err = p.PlatformUpdate("python", args, nil)
+	err = p.PlatformUpdate(provision.PlatformOptions{Name: "python", Args: args})
 	c.Assert(err, check.IsNil)
 	platform := p.GetPlatform("python")
 	c.Assert(platform.Name, check.Equals, "python")
@@ -868,7 +888,7 @@ func (s *S) TestExtensiblePlatformUpdate(c *check.C) {
 
 func (s *S) TestExtensiblePlatformUpdateNotFound(c *check.C) {
 	p := ExtensibleFakeProvisioner{FakeProvisioner: NewFakeProvisioner()}
-	err := p.PlatformUpdate("python", nil, nil)
+	err := p.PlatformUpdate(provision.PlatformOptions{Name: "python", Args: nil})
 	c.Assert(err, check.NotNil)
 	c.Assert(err.Error(), check.Equals, "platform not found")
 }
@@ -876,7 +896,7 @@ func (s *S) TestExtensiblePlatformUpdateNotFound(c *check.C) {
 func (s *S) TestExtensiblePlatformRemove(c *check.C) {
 	p := ExtensibleFakeProvisioner{FakeProvisioner: NewFakeProvisioner()}
 	args := map[string]string{"dockerfile": "mydockerfile.txt"}
-	err := p.PlatformAdd("python", args, nil)
+	err := p.PlatformAdd(provision.PlatformOptions{Name: "python", Args: args})
 	c.Assert(err, check.IsNil)
 	err = p.PlatformRemove("python")
 	c.Assert(err, check.IsNil)
@@ -966,7 +986,10 @@ func (s *S) TestFakeProvisionerSetUnitStatusUnitNotFound(c *check.C) {
 	c.Assert(err, check.IsNil)
 	unit := provision.Unit{AppName: "red-sector", ID: "red-sector/1", Status: provision.StatusStarted}
 	err = p.SetUnitStatus(unit, provision.StatusError)
-	c.Assert(err, check.Equals, provision.ErrUnitNotFound)
+	c.Assert(err, check.NotNil)
+	e, ok := err.(*provision.UnitNotFoundError)
+	c.Assert(ok, check.Equals, true)
+	c.Assert(e.ID, check.Equals, "red-sector/1")
 }
 
 func (s *S) TestFakeProvisionerRegisterUnit(c *check.C) {

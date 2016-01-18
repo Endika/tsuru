@@ -34,7 +34,6 @@ var nativeScheme = NativeScheme{}
 func (s *S) SetUpSuite(c *check.C) {
 	config.Set("auth:token-expire-days", 2)
 	config.Set("auth:hash-cost", bcrypt.MinCost)
-	config.Set("admin-team", "admin")
 	config.Set("database:url", "127.0.0.1:27017")
 	config.Set("database:name", "tsuru_auth_native_test")
 	var err error
@@ -52,7 +51,7 @@ func (s *S) SetUpTest(c *check.C) {
 	c.Assert(err, check.IsNil)
 	s.token, err = nativeScheme.Login(map[string]string{"email": s.user.Email, "password": "123456"})
 	c.Assert(err, check.IsNil)
-	team := &auth.Team{Name: "cobrateam", Users: []string{s.user.Email}}
+	team := &auth.Team{Name: "cobrateam"}
 	err = s.conn.Teams().Insert(team)
 	c.Assert(err, check.IsNil)
 	s.team = team
@@ -68,4 +67,8 @@ func (s *S) TearDownTest(c *check.C) {
 
 func (s *S) TearDownSuite(c *check.C) {
 	s.server.Stop()
+	conn, err := db.Conn()
+	c.Assert(err, check.IsNil)
+	defer conn.Close()
+	conn.Apps().Database.DropDatabase()
 }

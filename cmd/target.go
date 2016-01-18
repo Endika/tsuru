@@ -7,6 +7,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"os"
 	"regexp"
@@ -14,7 +15,7 @@ import (
 	"strings"
 	"syscall"
 
-	"launchpad.net/gnuflag"
+	"github.com/tsuru/gnuflag"
 )
 
 var errUndefinedTarget = errors.New(`No target defined. Please use target-add/target-set to define a target.
@@ -95,7 +96,16 @@ func ReadTarget() (string, error) {
 	if target := os.Getenv("TSURU_TARGET"); target != "" {
 		return target, nil
 	}
-	targetPath := JoinWithUserDir(".tsuru_target")
+	targetPath := JoinWithUserDir(".tsuru", "target")
+	target, err := readTarget(targetPath)
+	if err == errUndefinedTarget {
+		copyTargetFiles()
+		target, err = readTarget(JoinWithUserDir(".tsuru_target"))
+	}
+	return target, err
+}
+
+func readTarget(targetPath string) (string, error) {
 	if f, err := filesystem().Open(targetPath); err == nil {
 		defer f.Close()
 		if b, err := ioutil.ReadAll(f); err == nil {
@@ -106,7 +116,7 @@ func ReadTarget() (string, error) {
 }
 
 func deleteTargetFile() {
-	filesystem().Remove(JoinWithUserDir(".tsuru_target"))
+	filesystem().Remove(JoinWithUserDir(".tsuru", "target"))
 }
 
 func GetURL(path string) (string, error) {
@@ -122,7 +132,7 @@ func GetURL(path string) (string, error) {
 }
 
 func writeTarget(t string) error {
-	targetPath := JoinWithUserDir(".tsuru_target")
+	targetPath := JoinWithUserDir(".tsuru", "target")
 	targetFile, err := filesystem().OpenFile(targetPath, syscall.O_WRONLY|syscall.O_CREAT|syscall.O_TRUNC, 0600)
 	if err != nil {
 		return err
@@ -180,7 +190,7 @@ func (t *targetAdd) Flags() *gnuflag.FlagSet {
 }
 
 func resetTargetList() error {
-	targetsPath := JoinWithUserDir(".tsuru_targets")
+	targetsPath := JoinWithUserDir(".tsuru", "targets")
 	targetsFile, err := filesystem().OpenFile(targetsPath, syscall.O_WRONLY|syscall.O_CREAT|syscall.O_TRUNC, 0600)
 	if err != nil {
 		return err
@@ -199,7 +209,7 @@ func writeOnTargetList(label string, target string) error {
 	if targetExist {
 		return errors.New("Target label provided already exist")
 	}
-	targetsPath := JoinWithUserDir(".tsuru_targets")
+	targetsPath := JoinWithUserDir(".tsuru", "targets")
 	targetsFile, err := filesystem().OpenFile(targetsPath, syscall.O_RDWR|syscall.O_CREAT|syscall.O_APPEND, 0600)
 	if err != nil {
 		return err
@@ -227,22 +237,49 @@ func checkIfTargetLabelExists(label string) (bool, error) {
 
 func getTargets() (map[string]string, error) {
 	var targets = map[string]string{}
-	targetsPath := JoinWithUserDir(".tsuru_targets")
-	if f, err := filesystem().Open(targetsPath); err == nil {
+	legacyTargetsPath := JoinWithUserDir(".tsuru_targets")
+	targetsPath := JoinWithUserDir(".tsuru", "targets")
+	err := filesystem().MkdirAll(JoinWithUserDir(".tsuru"), 0700)
+	if err != nil {
+		return nil, err
+	}
+	var legacy bool
+	f, err := filesystem().Open(targetsPath)
+	if os.IsNotExist(err) {
+		f, err = filesystem().Open(legacyTargetsPath)
+		legacy = true
+	}
+	if err == nil {
 		defer f.Close()
 		if b, err := ioutil.ReadAll(f); err == nil {
 			var targetLines = strings.Split(strings.TrimSpace(string(b)), "\n")
-
 			for i := range targetLines {
-				var targetSplt = strings.Split(targetLines[i], "\t")
+				var targetSplit = strings.Split(targetLines[i], "\t")
 
-				if len(targetSplt) == 2 {
-					targets[targetSplt[0]] = targetSplt[1]
+				if len(targetSplit) == 2 {
+					targets[targetSplit[0]] = targetSplit[1]
 				}
 			}
 		}
 	}
+	if legacy {
+		copyTargetFiles()
+	}
 	return targets, nil
+}
+
+func copyTargetFiles() {
+	filesystem().MkdirAll(JoinWithUserDir(".tsuru"), 0700)
+	if src, err := filesystem().Open(JoinWithUserDir(".tsuru_targets")); err == nil {
+		defer src.Close()
+		if dst, err := filesystem().OpenFile(JoinWithUserDir(".tsuru", "targets"), syscall.O_WRONLY|syscall.O_CREAT|syscall.O_TRUNC, 0600); err == nil {
+			defer dst.Close()
+			io.Copy(dst, src)
+		}
+	}
+	if target, err := readTarget(JoinWithUserDir(".tsuru_target")); err == nil {
+		writeTarget(target)
+	}
 }
 
 type targetList struct{}

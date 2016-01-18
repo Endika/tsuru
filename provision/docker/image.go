@@ -1,4 +1,4 @@
-// Copyright 2015 tsuru authors. All rights reserved.
+// Copyright 2016 tsuru authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -7,6 +7,7 @@ package docker
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/fsouza/go-dockerclient"
@@ -29,6 +30,9 @@ type appImages struct {
 	Count   int
 }
 
+var procfileRegex = regexp.MustCompile("^([A-Za-z0-9_-]+):\\s*(.+)$")
+var errNoImagesAvailable = errors.New("no images available for app")
+
 func MigrateImages() error {
 	registry, _ := config.GetString("docker:registry")
 	if registry != "" {
@@ -38,7 +42,7 @@ func MigrateImages() error {
 	if err != nil {
 		return err
 	}
-	apps, err := app.List(nil, nil)
+	apps, err := app.List(nil)
 	if err != nil {
 		return err
 	}
@@ -240,7 +244,7 @@ func appCurrentImageName(appName string) (string, error) {
 		return appBasicImageName(appName), nil
 	}
 	if len(imgs.Images) == 0 {
-		return "", fmt.Errorf("no images available for app %q", appName)
+		return "", errNoImagesAvailable
 	}
 	return imgs.Images[len(imgs.Images)-1], nil
 }
@@ -294,19 +298,6 @@ func listValidAppImages(appName string) ([]string, error) {
 	return img.Images, nil
 }
 
-func isValidAppImage(appName, imageId string) (bool, error) {
-	images, err := listValidAppImages(appName)
-	if err != nil && err != mgo.ErrNotFound {
-		return false, err
-	}
-	for _, img := range images {
-		if img == imageId {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
 func imageHistorySize() int {
 	imgHistorySize, _ := config.GetInt("docker:image-history-size")
 	if imgHistorySize == 0 {
@@ -321,7 +312,9 @@ func deleteAllAppImageNames(appName string) error {
 		return err
 	}
 	defer dataColl.Close()
-	_, err = dataColl.RemoveAll(bson.M{"_id": bson.RegEx{Pattern: appBasicImageName(appName)}})
+	_, err = dataColl.RemoveAll(bson.M{"_id": bson.RegEx{
+		Pattern: appBasicImageName(appName) + `:v\d+$`,
+	}})
 	if err != nil {
 		return err
 	}
@@ -364,6 +357,28 @@ func basicImageName() string {
 	repoNamespace, _ := config.GetString("docker:repository-namespace")
 	parts = append(parts, repoNamespace)
 	return strings.Join(parts, "/")
+}
+
+func getProcessesFromProcfile(strProcfile string) map[string]string {
+	processes := map[string]string{}
+	procfile := strings.Split(strProcfile, "\n")
+	for _, process := range procfile {
+		if p := procfileRegex.FindStringSubmatch(process); p != nil {
+			processes[p[1]] = strings.Trim(p[2], " ")
+		}
+	}
+	return processes
+}
+
+func createImageMetadata(imageName string, processes map[string]string) ImageMetadata {
+	customProcesses := map[string]interface{}{}
+	for k, v := range processes {
+		customProcesses[k] = v
+	}
+	customData := map[string]interface{}{
+		"processes": customProcesses,
+	}
+	return ImageMetadata{Name: imageName, CustomData: customData, Processes: processes}
 }
 
 func (p *dockerProvisioner) usePlatformImage(app provision.App) bool {

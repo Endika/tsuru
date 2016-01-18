@@ -1,4 +1,4 @@
-// Copyright 2015 tsuru authors. All rights reserved.
+// Copyright 2016 tsuru authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	dtesting "github.com/fsouza/go-dockerclient/testing"
 	"github.com/tsuru/config"
@@ -83,7 +84,6 @@ func (s *S) SetUpSuite(c *check.C) {
 	config.Set("queue:mongo-polling-interval", 0.01)
 	config.Set("routers:fake:type", "fake")
 	config.Set("repo-manager", "fake")
-	config.Set("admin-team", "admin")
 	config.Set("docker:registry-max-try", 1)
 	config.Set("auth:hash-cost", bcrypt.MinCost)
 	s.deployCmd = "/var/lib/tsuru/deploy"
@@ -105,12 +105,11 @@ func (s *S) SetUpSuite(c *check.C) {
 	app.AuthScheme = nativeScheme
 	_, err = nativeScheme.Create(s.user)
 	c.Assert(err, check.IsNil)
-	s.team = &auth.Team{Name: "admin", Users: []string{s.user.Email}}
+	s.team = &auth.Team{Name: "admin"}
 	c.Assert(err, check.IsNil)
 	err = s.storage.Teams().Insert(s.team)
 	c.Assert(err, check.IsNil)
-	s.token, err = nativeScheme.Login(map[string]string{"email": s.user.Email, "password": "123456"})
-	c.Assert(err, check.IsNil)
+	routesRebuildRetryTime = 50 * time.Millisecond
 }
 
 func (s *S) SetUpTest(c *check.C) {
@@ -141,6 +140,7 @@ func (s *S) SetUpTest(c *check.C) {
 	s.storage.Tokens().Remove(bson.M{"appname": bson.M{"$ne": ""}})
 	s.logBuf = safe.NewBuffer(nil)
 	log.SetLogger(log.NewWriterLogger(s.logBuf, true))
+	s.token = createTokenForUser(s.user, c)
 }
 
 func (s *S) TearDownTest(c *check.C) {
@@ -153,10 +153,16 @@ func (s *S) TearDownTest(c *check.C) {
 }
 
 func (s *S) TearDownSuite(c *check.C) {
-	s.clusterSess.Close()
-	s.storage.Close()
+	defer s.clusterSess.Close()
+	defer s.storage.Close()
 	os.Unsetenv("TSURU_TARGET")
 	app.Provisioner = s.oldProvisioner
+	conn, err := db.Conn()
+	c.Assert(err, check.IsNil)
+	defer conn.Close()
+	conn.Apps().Database.DropDatabase()
+	clusterDbName, _ := config.GetString("docker:cluster:mongo-database")
+	conn.Apps().Database.Session.DB(clusterDbName).DropDatabase()
 }
 
 func clearClusterStorage(sess *mgo.Session) error {

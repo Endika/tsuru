@@ -15,9 +15,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tsuru/gnuflag"
 	"github.com/tsuru/tsuru/cmd"
 	tsuruIo "github.com/tsuru/tsuru/io"
-	"launchpad.net/gnuflag"
+	"github.com/tsuru/tsuru/net"
 )
 
 type addNodeToSchedulerCmd struct {
@@ -93,6 +94,7 @@ func (a *addNodeToSchedulerCmd) Flags() *gnuflag.FlagSet {
 type updateNodeToSchedulerCmd struct {
 	fs       *gnuflag.FlagSet
 	disabled bool
+	enabled  bool
 }
 
 func (updateNodeToSchedulerCmd) Info() *cmd.Info {
@@ -100,8 +102,9 @@ func (updateNodeToSchedulerCmd) Info() *cmd.Info {
 		Name:  "docker-node-update",
 		Usage: "docker-node-update <address> [param_name=param_value...] --disable",
 		Desc: `Modifies metadata associated to a docker node.
---disable: Disable node in scheduler.`,
-		MinArgs: 2,
+--disable: Disable node in scheduler.
+--enable: Enable node in scheduler.`,
+		MinArgs: 1,
 	}
 }
 
@@ -109,6 +112,7 @@ func (a *updateNodeToSchedulerCmd) Flags() *gnuflag.FlagSet {
 	if a.fs == nil {
 		a.fs = gnuflag.NewFlagSet("", gnuflag.ExitOnError)
 		a.fs.BoolVar(&a.disabled, "disable", false, "Disable node in scheduler.")
+		a.fs.BoolVar(&a.enabled, "enable", false, "Enable node in scheduler.")
 	}
 	return a.fs
 }
@@ -126,7 +130,7 @@ func (a *updateNodeToSchedulerCmd) Run(ctx *cmd.Context, client *cmd.Client) err
 	if err != nil {
 		return err
 	}
-	url, err := cmd.GetURL(fmt.Sprintf("/docker/node?disabled=%t", a.disabled))
+	url, err := cmd.GetURL(fmt.Sprintf("/docker/node?disabled=%t&enabled=%t", a.disabled, a.enabled))
 	if err != nil {
 		return err
 	}
@@ -284,7 +288,7 @@ func (c *listNodesInTheSchedulerCmd) Run(ctx *cmd.Context, client *cmd.Client) e
 			}
 		}
 		sort.Strings(result)
-		m, ok := machineMap[urlToHost(addr)]
+		m, ok := machineMap[net.URLToHost(addr)]
 		var iaasId string
 		if ok {
 			iaasId = m["Id"].(string)

@@ -44,7 +44,6 @@ func (s *S) SetUpSuite(c *check.C) {
 	config.Set("auth:oauth:token-url", s.server.URL+"/token")
 	config.Set("auth:oauth:info-url", s.server.URL+"/user")
 	config.Set("auth:oauth:collection", "oauth_token")
-	config.Set("admin-team", "admin")
 	config.Set("database:url", "127.0.0.1:27017")
 	config.Set("database:name", "tsuru_auth_oauth_test")
 	config.Set("auth:user-registration", true)
@@ -67,4 +66,8 @@ func (s *S) TearDownTest(c *check.C) {
 
 func (s *S) TearDownSuite(c *check.C) {
 	s.server.Close()
+	conn, err := db.Conn()
+	c.Assert(err, check.IsNil)
+	defer conn.Close()
+	conn.Users().Database.DropDatabase()
 }

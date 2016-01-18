@@ -1,4 +1,4 @@
-// Copyright 2014 tsuru authors. All rights reserved.
+// Copyright 2015 tsuru authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -12,9 +12,14 @@ import (
 	"github.com/tsuru/tsuru/app"
 	"github.com/tsuru/tsuru/auth"
 	"github.com/tsuru/tsuru/errors"
+	"github.com/tsuru/tsuru/permission"
 )
 
 func getUserQuota(w http.ResponseWriter, r *http.Request, t auth.Token) error {
+	allowed := permission.Check(t, permission.PermUserUpdateQuota)
+	if !allowed {
+		return permission.ErrUnauthorized
+	}
 	email := r.URL.Query().Get(":email")
 	user, err := auth.GetUserByEmail(email)
 	if err == auth.ErrUserNotFound {
@@ -22,13 +27,18 @@ func getUserQuota(w http.ResponseWriter, r *http.Request, t auth.Token) error {
 			Code:    http.StatusNotFound,
 			Message: err.Error(),
 		}
-	} else if err != nil {
+	}
+	if err != nil {
 		return err
 	}
 	return json.NewEncoder(w).Encode(user.Quota)
 }
 
 func changeUserQuota(w http.ResponseWriter, r *http.Request, t auth.Token) error {
+	allowed := permission.Check(t, permission.PermUserUpdateQuota)
+	if !allowed {
+		return permission.ErrUnauthorized
+	}
 	limit, err := strconv.Atoi(r.FormValue("limit"))
 	if err != nil {
 		return &errors.HTTP{
@@ -50,14 +60,18 @@ func changeUserQuota(w http.ResponseWriter, r *http.Request, t auth.Token) error
 }
 
 func getAppQuota(w http.ResponseWriter, r *http.Request, t auth.Token) error {
-	a, err := app.GetByName(r.URL.Query().Get(":appname"))
-	if err == app.ErrAppNotFound {
-		return &errors.HTTP{
-			Code:    http.StatusNotFound,
-			Message: err.Error(),
-		}
-	} else if err != nil {
+	a, err := getAppFromContext(r.URL.Query().Get(":appname"), r)
+	if err != nil {
 		return err
+	}
+	canRead := permission.Check(t, permission.PermAppRead,
+		append(permission.Contexts(permission.CtxTeam, a.Teams),
+			permission.Context(permission.CtxApp, a.Name),
+			permission.Context(permission.CtxPool, a.Pool),
+		)...,
+	)
+	if !canRead {
+		return permission.ErrUnauthorized
 	}
 	return json.NewEncoder(w).Encode(a.Quota)
 }
@@ -71,9 +85,18 @@ func changeAppQuota(w http.ResponseWriter, r *http.Request, t auth.Token) error 
 		}
 	}
 	appName := r.URL.Query().Get(":appname")
-	a, err := app.GetByName(appName)
+	a, err := getAppFromContext(appName, r)
 	if err != nil {
 		return err
 	}
-	return app.ChangeQuota(a, limit)
+	allowed := permission.Check(t, permission.PermAppAdminQuota,
+		append(permission.Contexts(permission.CtxTeam, a.Teams),
+			permission.Context(permission.CtxApp, a.Name),
+			permission.Context(permission.CtxPool, a.Pool),
+		)...,
+	)
+	if !allowed {
+		return permission.ErrUnauthorized
+	}
+	return app.ChangeQuota(&a, limit)
 }

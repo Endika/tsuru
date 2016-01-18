@@ -1,4 +1,4 @@
-// Copyright 2015 tsuru authors. All rights reserved.
+// Copyright 2016 tsuru authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
-	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -20,6 +19,7 @@ import (
 	"github.com/tsuru/docker-cluster/cluster"
 	"github.com/tsuru/tsuru/db/storage"
 	"github.com/tsuru/tsuru/log"
+	"github.com/tsuru/tsuru/net"
 	"github.com/tsuru/tsuru/provision"
 	"gopkg.in/mgo.v2/bson"
 )
@@ -37,6 +37,7 @@ type DockerProvisioner interface {
 }
 
 type Container struct {
+	MongoID                 bson.ObjectId `bson:"_id,omitempty"`
 	ID                      string
 	AppName                 string
 	ProcessName             string
@@ -103,6 +104,7 @@ func (c *Container) Create(args *CreateArgs) error {
 	config := docker.Config{
 		Image:        args.ImageID,
 		Cmd:          args.Commands,
+		Entrypoint:   []string{"/bin/bash", "-c"},
 		User:         user,
 		ExposedPorts: exposedPorts,
 		AttachStdin:  false,
@@ -131,7 +133,7 @@ func (c *Container) Create(args *CreateArgs) error {
 		return err
 	}
 	c.ID = cont.ID
-	c.HostAddr = urlToHost(addr)
+	c.HostAddr = net.URLToHost(addr)
 	c.User = user
 	return nil
 }
@@ -142,7 +144,7 @@ func (c *Container) hostToNodeAddress(p DockerProvisioner, host string) (string,
 		return "", err
 	}
 	for _, node := range nodes {
-		if urlToHost(node.Address) == host {
+		if net.URLToHost(node.Address) == host {
 			return node.Address, nil
 		}
 	}
@@ -208,8 +210,8 @@ func (c *Container) NetworkInfo(p DockerProvisioner) (NetworkInfo, error) {
 	return netInfo, err
 }
 
-func (c *Container) SetStatus(p DockerProvisioner, status string, updateDB bool) error {
-	c.Status = status
+func (c *Container) SetStatus(p DockerProvisioner, status provision.Status, updateDB bool) error {
+	c.Status = status.String()
 	c.LastStatusUpdate = time.Now().In(time.UTC)
 	updateData := bson.M{
 		"status":           c.Status,
@@ -395,7 +397,7 @@ func (c *Container) Stop(p DockerProvisioner) error {
 	if err != nil {
 		log.Errorf("error on stop container %s: %s", c.ID, err)
 	}
-	c.SetStatus(p, provision.StatusStopped.String(), true)
+	c.SetStatus(p, provision.StatusStopped, true)
 	return nil
 }
 
@@ -462,9 +464,9 @@ func (c *Container) Start(args *StartArgs) error {
 	if err != nil {
 		return err
 	}
-	initialStatus := provision.StatusStarting.String()
+	initialStatus := provision.StatusStarting
 	if args.Deploy {
-		initialStatus = provision.StatusBuilding.String()
+		initialStatus = provision.StatusBuilding
 	}
 	return c.SetStatus(args.Provisioner, initialStatus, false)
 }
@@ -485,8 +487,12 @@ func (c *Container) startWithPortSearch(p DockerProvisioner, hostConfig *docker.
 		if err != nil {
 			return err
 		}
-		portStr := strconv.Itoa(port)
-		for _, used := usedPorts[portStr]; used; port++ {
+		var portStr string
+		for ; port <= portRangeEnd; port++ {
+			portStr = strconv.Itoa(port)
+			if _, used := usedPorts[portStr]; !used {
+				break
+			}
 		}
 		if port > portRangeEnd {
 			break
@@ -570,18 +576,6 @@ func getPort() (string, error) {
 		return "", err
 	}
 	return fmt.Sprint(port), nil
-}
-
-func urlToHost(urlStr string) string {
-	url, _ := url.Parse(urlStr)
-	if url == nil || url.Host == "" {
-		return urlStr
-	}
-	host, _, _ := net.SplitHostPort(url.Host)
-	if host == "" {
-		return url.Host
-	}
-	return host
 }
 
 type waitResult struct {

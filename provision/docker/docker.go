@@ -1,4 +1,4 @@
-// Copyright 2015 tsuru authors. All rights reserved.
+// Copyright 2016 tsuru authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -9,8 +9,6 @@ import (
 	"crypto/rand"
 	"fmt"
 	"io"
-	"net"
-	"net/url"
 	"time"
 
 	"github.com/fsouza/go-dockerclient"
@@ -19,6 +17,7 @@ import (
 	"github.com/tsuru/docker-cluster/storage/mongodb"
 	"github.com/tsuru/tsuru/action"
 	"github.com/tsuru/tsuru/log"
+	"github.com/tsuru/tsuru/net"
 	"github.com/tsuru/tsuru/provision"
 	"github.com/tsuru/tsuru/provision/docker/container"
 	"github.com/tsuru/tsuru/safe"
@@ -38,29 +37,25 @@ func buildClusterStorage() (cluster.Storage, error) {
 	return storage, nil
 }
 
-func urlToHost(urlStr string) string {
-	url, _ := url.Parse(urlStr)
-	if url == nil || url.Host == "" {
-		return urlStr
-	}
-	host, _, _ := net.SplitHostPort(url.Host)
-	if host == "" {
-		return url.Host
-	}
-	return host
-}
-
 func (p *dockerProvisioner) hostToNodeAddress(host string) (string, error) {
-	nodes, err := p.Cluster().Nodes()
+	node, err := p.getNodeByHost(host)
 	if err != nil {
 		return "", err
 	}
+	return node.Address, nil
+}
+
+func (p *dockerProvisioner) getNodeByHost(host string) (cluster.Node, error) {
+	nodes, err := p.Cluster().Nodes()
+	if err != nil {
+		return cluster.Node{}, err
+	}
 	for _, node := range nodes {
-		if urlToHost(node.Address) == host {
-			return node.Address, nil
+		if net.URLToHost(node.Address) == host {
+			return node, nil
 		}
 	}
-	return "", fmt.Errorf("Host `%s` not found", host)
+	return cluster.Node{}, fmt.Errorf("Host `%s` not found", host)
 }
 
 func randomString() string {
@@ -90,6 +85,7 @@ func (p *dockerProvisioner) deployPipeline(app provision.App, imageId string, co
 	actions := []*action.Action{
 		&insertEmptyContainerInDB,
 		&createContainer,
+		&setContainerID,
 		&startContainer,
 		&updateContainerInDB,
 		&followLogsAndCommit,
@@ -126,6 +122,7 @@ func (p *dockerProvisioner) start(oldContainer *container.Container, app provisi
 		actions = []*action.Action{
 			&insertEmptyContainerInDB,
 			&createContainer,
+			&setContainerID,
 			&stopContainer,
 			&updateContainerInDB,
 			&setNetworkInfo,
@@ -134,6 +131,7 @@ func (p *dockerProvisioner) start(oldContainer *container.Container, app provisi
 		actions = []*action.Action{
 			&insertEmptyContainerInDB,
 			&createContainer,
+			&setContainerID,
 			&startContainer,
 			&updateContainerInDB,
 			&setNetworkInfo,
@@ -149,6 +147,47 @@ func (p *dockerProvisioner) start(oldContainer *container.Container, app provisi
 		provisioner:      p,
 	}
 	err = pipeline.Execute(args)
+	if err != nil {
+		return nil, err
+	}
+	c := pipeline.Result().(container.Container)
+	err = c.SetImage(p, imageId)
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+func (p *dockerProvisioner) startImage(oldContainer *container.Container, app provision.App, imageId string, w io.Writer, destinationHosts ...string) (*container.Container, error) {
+	var actions []*action.Action
+	if oldContainer != nil && oldContainer.Status == provision.StatusStopped.String() {
+		actions = []*action.Action{
+			&insertEmptyContainerInDB,
+			&createContainerFromImage,
+			&setContainerID,
+			&stopContainer,
+			&updateContainerInDB,
+			&setNetworkInfo,
+		}
+	} else {
+		actions = []*action.Action{
+			&insertEmptyContainerInDB,
+			&createContainerFromImage,
+			&setContainerID,
+			&startContainer,
+			&updateContainerInDB,
+			&setNetworkInfo,
+		}
+	}
+	pipeline := action.NewPipeline(actions...)
+	args := runContainerActionsArgs{
+		app:              app,
+		processName:      "web",
+		imageID:          imageId,
+		destinationHosts: destinationHosts,
+		provisioner:      p,
+	}
+	err := pipeline.Execute(args)
 	if err != nil {
 		return nil, err
 	}

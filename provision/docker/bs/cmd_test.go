@@ -12,6 +12,8 @@ import (
 
 	"github.com/tsuru/tsuru/cmd"
 	"github.com/tsuru/tsuru/cmd/cmdtest"
+	"github.com/tsuru/tsuru/io"
+	"github.com/tsuru/tsuru/provision"
 	"gopkg.in/check.v1"
 )
 
@@ -22,16 +24,18 @@ func (s *S) TestBsEnvSetRun(c *check.C) {
 		Stderr: &stderr,
 		Args:   []string{"A=1", "B=2"},
 	}
+	msg := io.SimpleJsonMessage{Message: "env-set success"}
+	result, _ := json.Marshal(msg)
 	trans := &cmdtest.ConditionalTransport{
-		Transport: cmdtest.Transport{Message: "", Status: http.StatusNoContent},
+		Transport: cmdtest.Transport{Message: string(result), Status: http.StatusNoContent},
 		CondFunc: func(req *http.Request) bool {
 			defer req.Body.Close()
 			body, err := ioutil.ReadAll(req.Body)
 			c.Assert(err, check.IsNil)
-			expected := Config{
-				Envs: []Env{{Name: "A", Value: "1"}, {Name: "B", Value: "2"}},
+			expected := provision.ScopedConfig{
+				Envs: []provision.Entry{{Name: "A", Value: "1"}, {Name: "B", Value: "2"}},
 			}
-			var conf Config
+			var conf provision.ScopedConfig
 			err = json.Unmarshal(body, &conf)
 			c.Assert(conf, check.DeepEquals, expected)
 			return req.URL.Path == "/docker/bs/env" && req.Method == "POST"
@@ -42,7 +46,58 @@ func (s *S) TestBsEnvSetRun(c *check.C) {
 	cmd := EnvSetCmd{}
 	err := cmd.Run(&context, client)
 	c.Assert(err, check.IsNil)
-	c.Assert(stdout.String(), check.Equals, "Variables successfully set.\n")
+	c.Assert(stdout.String(), check.Equals, "env-set success")
+}
+
+func (s *S) TestBsEnvSetRunAllowEmpty(c *check.C) {
+	var stdout, stderr bytes.Buffer
+	context := cmd.Context{
+		Stdout: &stdout,
+		Stderr: &stderr,
+		Args:   []string{"A=1", "B="},
+	}
+	msg := io.SimpleJsonMessage{Message: "env-set success"}
+	result, _ := json.Marshal(msg)
+	trans := &cmdtest.ConditionalTransport{
+		Transport: cmdtest.Transport{Message: string(result), Status: http.StatusNoContent},
+		CondFunc: func(req *http.Request) bool {
+			defer req.Body.Close()
+			body, err := ioutil.ReadAll(req.Body)
+			c.Assert(err, check.IsNil)
+			expected := provision.ScopedConfig{
+				Envs: []provision.Entry{{Name: "A", Value: "1"}, {Name: "B", Value: ""}},
+			}
+			var conf provision.ScopedConfig
+			err = json.Unmarshal(body, &conf)
+			c.Assert(conf, check.DeepEquals, expected)
+			return req.URL.Path == "/docker/bs/env" && req.Method == "POST"
+		},
+	}
+	manager := cmd.NewManager("admin", "0.1", "admin-ver", &stdout, &stderr, nil, nil)
+	client := cmd.NewClient(&http.Client{Transport: trans}, nil, manager)
+	cmd := EnvSetCmd{}
+	err := cmd.Run(&context, client)
+	c.Assert(err, check.IsNil)
+	c.Assert(stdout.String(), check.Equals, "env-set success")
+}
+
+func (s *S) TestBsEnvSetRunInvalidInput(c *check.C) {
+	var stdout, stderr bytes.Buffer
+	manager := cmd.NewManager("admin", "0.1", "admin-ver", &stdout, &stderr, nil, nil)
+	client := cmd.NewClient(&http.Client{}, nil, manager)
+	command := EnvSetCmd{}
+	err := command.Run(&cmd.Context{
+		Stdout: &stdout,
+		Stderr: &stderr,
+		Args:   []string{"xxx"},
+	}, client)
+	c.Assert(err, check.ErrorMatches, "invalid variable values")
+	err = command.Run(&cmd.Context{
+		Stdout: &stdout,
+		Stderr: &stderr,
+		Args:   []string{"a=1", "="},
+	}, client)
+	c.Assert(err, check.ErrorMatches, "invalid variable values")
 }
 
 func (s *S) TestBsEnvSetRunForPool(c *check.C) {
@@ -52,19 +107,21 @@ func (s *S) TestBsEnvSetRunForPool(c *check.C) {
 		Stderr: &stderr,
 		Args:   []string{"A=1", "B=2"},
 	}
+	msg := io.SimpleJsonMessage{Message: "env-set success"}
+	result, _ := json.Marshal(msg)
 	trans := &cmdtest.ConditionalTransport{
-		Transport: cmdtest.Transport{Message: "", Status: http.StatusNoContent},
+		Transport: cmdtest.Transport{Message: string(result), Status: http.StatusNoContent},
 		CondFunc: func(req *http.Request) bool {
 			defer req.Body.Close()
 			body, err := ioutil.ReadAll(req.Body)
 			c.Assert(err, check.IsNil)
-			expected := Config{
-				Pools: []PoolEnvs{{
+			expected := provision.ScopedConfig{
+				Pools: []provision.PoolEntry{{
 					Name: "pool1",
-					Envs: []Env{{Name: "A", Value: "1"}, {Name: "B", Value: "2"}},
+					Envs: []provision.Entry{{Name: "A", Value: "1"}, {Name: "B", Value: "2"}},
 				}},
 			}
-			var conf Config
+			var conf provision.ScopedConfig
 			err = json.Unmarshal(body, &conf)
 			c.Assert(conf, check.DeepEquals, expected)
 			return req.URL.Path == "/docker/bs/env" && req.Method == "POST"
@@ -77,7 +134,7 @@ func (s *S) TestBsEnvSetRunForPool(c *check.C) {
 	c.Assert(err, check.IsNil)
 	err = cmd.Run(&context, client)
 	c.Assert(err, check.IsNil)
-	c.Assert(stdout.String(), check.Equals, "Variables successfully set.\n")
+	c.Assert(stdout.String(), check.Equals, "env-set success")
 }
 
 func (s *S) TestBsInfoRun(c *check.C) {
@@ -86,18 +143,18 @@ func (s *S) TestBsInfoRun(c *check.C) {
 		Stdout: &stdout,
 		Stderr: &stderr,
 	}
-	conf := Config{
-		Image: "tsuru/bs",
-		Envs: []Env{
+	conf := provision.ScopedConfig{
+		Extra: map[string]interface{}{"image": "tsuru/bs"},
+		Envs: []provision.Entry{
 			{Name: "A", Value: "1"},
 			{Name: "B", Value: "2"},
 		},
-		Pools: []PoolEnvs{
-			{Name: "pool1", Envs: []Env{
+		Pools: []provision.PoolEntry{
+			{Name: "pool1", Envs: []provision.Entry{
 				{Name: "A", Value: "9"},
 				{Name: "Z", Value: "8"},
 			}},
-			{Name: "pool2", Envs: []Env{
+			{Name: "pool2", Envs: []provision.Entry{
 				{Name: "Y", Value: "7"},
 			}},
 		},
@@ -150,8 +207,10 @@ func (s *S) TestBsUpgradeRun(c *check.C) {
 		Stderr: &stderr,
 		Args:   []string{"A=1", "B=2"},
 	}
+	msg := io.SimpleJsonMessage{Message: "it worked!"}
+	result, err := json.Marshal(msg)
 	trans := &cmdtest.ConditionalTransport{
-		Transport: cmdtest.Transport{Message: "", Status: http.StatusNoContent},
+		Transport: cmdtest.Transport{Message: string(result), Status: http.StatusNoContent},
 		CondFunc: func(req *http.Request) bool {
 			called = true
 			return req.URL.Path == "/docker/bs/upgrade" && req.Method == "POST"
@@ -160,8 +219,8 @@ func (s *S) TestBsUpgradeRun(c *check.C) {
 	manager := cmd.NewManager("admin", "0.1", "admin-ver", &stdout, &stderr, nil, nil)
 	client := cmd.NewClient(&http.Client{Transport: trans}, nil, manager)
 	cmd := UpgradeCmd{}
-	err := cmd.Run(&context, client)
+	err = cmd.Run(&context, client)
 	c.Assert(err, check.IsNil)
-	c.Assert(stdout.String(), check.Equals, "bs successfully upgraded.\n")
+	c.Assert(stdout.String(), check.Equals, "it worked!")
 	c.Assert(called, check.Equals, true)
 }

@@ -1,19 +1,18 @@
 language: go
 sudo: false
 go:
-  - 1.4.2
-  - 1.5.1
+  - 1.5.3
+  - 1.6beta2
   - tip
 env:
-  - GOARCH=amd64
+  global:
+    - GOARCH=amd64
+    - GO15VENDOREXPERIMENT=1
 addons:
   apt:
     packages:
       - rsyslog
-before_install:
-  - sed -E -i 's|git://github.com/([A-Za-z0-9_]+)/tsuru.git|https://github.com/\1/tsuru|g' .git/config
-install:
-  - make get
+      - xmlsec1
 before_script:
   - rsyslogd &
   - sleep 1
@@ -21,6 +20,14 @@ script:
   - make test
   - ./check-fmt.sh
   - make deadcode
+  - go get golang.org/x/net/http2/...
+
+# TODO(fss): re-enable handler checking when golang/go#12459 is fixed.
+#
+# https://github.com/golang/go/issues/12459
+#
+#  - ./check-handlers.sh
+#
 notifications:
   email:
     on_success: change

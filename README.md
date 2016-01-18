@@ -1,6 +1,5 @@
 #tsuru
 
-[![Build Status](https://drone.io/github.com/tsuru/tsuru/status.png?branch=master)](https://drone.io/github.com/tsuru/tsuru/latest)
 [![Build Status](https://travis-ci.org/tsuru/tsuru.png?branch=master)](https://travis-ci.org/tsuru/tsuru)
 
 ##What is tsuru?
@@ -19,8 +18,7 @@ others.
 
 Links:
 
-- Full Documentation: http://docs.tsuru.io
-- How to Contribute: http://docs.tsuru.io/en/stable/contributing
+- Full Documentation: https://docs.tsuru.io
+- How to Contribute: https://docs.tsuru.io/stable/contributing/
 - Repository & Issue Tracker: https://github.com/tsuru/tsuru
-- IRC: Freenode, channel #tsuru
-- Gitter: https://gitter.im/tsuru/tsuru
+- Talk to us on Gitter: https://gitter.im/tsuru/tsuru

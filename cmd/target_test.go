@@ -16,7 +16,7 @@ import (
 )
 
 func readRecordedTarget(fs *fstest.RecordingFs) string {
-	filePath := path.Join(os.ExpandEnv("${HOME}"), ".tsuru_target")
+	filePath := path.Join(os.ExpandEnv("${HOME}"), ".tsuru", "target")
 	fil, _ := fsystem.Open(filePath)
 	b, _ := ioutil.ReadAll(fil)
 	return string(b)
@@ -31,7 +31,7 @@ func (s *S) TestWriteTarget(c *check.C) {
 	os.Unsetenv("TSURU_TARGET")
 	err := writeTarget("http://tsuru.globo.com")
 	c.Assert(err, check.IsNil)
-	filePath := path.Join(os.ExpandEnv("${HOME}"), ".tsuru_target")
+	filePath := path.Join(os.ExpandEnv("${HOME}"), ".tsuru", "target")
 	c.Assert(rfs.HasAction("openfile "+filePath+" with mode 0600"), check.Equals, true)
 	c.Assert(readRecordedTarget(rfs), check.Equals, "http://tsuru.globo.com")
 }
@@ -58,6 +58,25 @@ func (s *S) TestReadTarget(c *check.C) {
 	target, err := ReadTarget()
 	c.Assert(err, check.IsNil)
 	c.Assert(target, check.Equals, "http://tsuru.google.com")
+}
+
+func (s *S) TestReadTargetLegacy(c *check.C) {
+	os.Unsetenv("TSURU_TARGET")
+	var rfs fstest.RecordingFs
+	fsystem = &rfs
+	defer func() { fsystem = nil }()
+	f, err := fsystem.Create(JoinWithUserDir(".tsuru_target"))
+	c.Assert(err, check.IsNil)
+	f.WriteString("http://tsuru.google.com")
+	f.Close()
+	target, err := ReadTarget()
+	c.Assert(err, check.IsNil)
+	c.Assert(target, check.Equals, "http://tsuru.google.com")
+	target, err = readTarget(JoinWithUserDir(".tsuru", "target"))
+	c.Assert(err, check.IsNil)
+	c.Assert(target, check.Equals, "http://tsuru.google.com")
+	dir := JoinWithUserDir(".tsuru")
+	c.Assert(rfs.HasAction("mkdirall "+dir+" with mode 0700"), check.Equals, true)
 }
 
 func (s *S) TestReadTargetEnvironmentVariable(c *check.C) {
@@ -102,7 +121,7 @@ func (s *S) TestDeleteTargetFile(c *check.C) {
 		fsystem = nil
 	}()
 	deleteTargetFile()
-	targetFile := JoinWithUserDir(".tsuru_target")
+	targetFile := JoinWithUserDir(".tsuru", "target")
 	c.Assert(rfs.HasAction("remove "+targetFile), check.Equals, true)
 }
 
@@ -275,10 +294,33 @@ func (s *S) TestGetTargets(c *check.C) {
 	}
 	got, err := getTargets()
 	c.Assert(err, check.IsNil)
-	c.Assert(len(got), check.Equals, len(expected))
-	for k, v := range got {
-		c.Assert(expected[k], check.Equals, v)
+	c.Assert(got, check.DeepEquals, expected)
+	dir := JoinWithUserDir(".tsuru")
+	c.Assert(rfs.HasAction("mkdirall "+dir+" with mode 0700"), check.Equals, true)
+}
+
+func (s *S) TestGetTargetsLegacy(c *check.C) {
+	var rfs fstest.RecordingFs
+	fsystem = &rfs
+	defer func() { fsystem = nil }()
+	content := "first\thttp://tsuru.io/\ndefault\thttp://tsuru.google.com\n"
+	f, err := fsystem.Create(JoinWithUserDir(".tsuru_targets"))
+	c.Assert(err, check.IsNil)
+	f.WriteString(content)
+	f.Close()
+	var expected = map[string]string{
+		"first":   "http://tsuru.io/",
+		"default": "http://tsuru.google.com",
 	}
+	got, err := getTargets()
+	c.Assert(err, check.IsNil)
+	c.Assert(got, check.DeepEquals, expected)
+	f, err = fsystem.Open(JoinWithUserDir(".tsuru", "targets"))
+	c.Assert(err, check.IsNil)
+	defer f.Close()
+	b, err := ioutil.ReadAll(f)
+	c.Assert(err, check.IsNil)
+	c.Assert(string(b), check.Equals, content)
 }
 
 func (s *S) TestTargetInfo(c *check.C) {
@@ -305,10 +347,10 @@ func (s *S) TestTargetRun(c *check.C) {
 default	http://tsuru.google.com
 other	http://other.tsuru.io`
 	rfs := &fstest.RecordingFs{}
-	f, _ := rfs.Create(JoinWithUserDir(".tsuru_target"))
+	f, _ := rfs.Create(JoinWithUserDir(".tsuru", "target"))
 	f.Write([]byte("http://tsuru.io"))
 	f.Close()
-	f, _ = rfs.Create(JoinWithUserDir(".tsuru_targets"))
+	f, _ = rfs.Create(JoinWithUserDir(".tsuru", "targets"))
 	f.Write([]byte(content))
 	f.Close()
 	fsystem = rfs
@@ -361,7 +403,7 @@ func (s *S) TestTargetRemoveInfo(c *check.C) {
 
 func (s *S) TestTargetRemove(c *check.C) {
 	rfs := &fstest.RecordingFs{FileContent: "first\thttp://tsuru.io/\ndefault\thttp://tsuru.google.com"}
-	f, _ := rfs.Create(JoinWithUserDir(".tsuru_target"))
+	f, _ := rfs.Create(JoinWithUserDir(".tsuru", "target"))
 	f.Write([]byte("http://tsuru.google.com"))
 	f.Close()
 	fsystem = rfs
@@ -394,10 +436,10 @@ func (s *S) TestTargetRemove(c *check.C) {
 func (s *S) TestTargetRemoveCurrentTarget(c *check.C) {
 	os.Unsetenv("TSURU_TARGET")
 	rfs := &fstest.RecordingFs{}
-	f, _ := rfs.Create(JoinWithUserDir(".tsuru_targets"))
+	f, _ := rfs.Create(JoinWithUserDir(".tsuru", "targets"))
 	f.Write([]byte("first\thttp://tsuru.io/\ndefault\thttp://tsuru.google.com"))
 	f.Close()
-	f, _ = rfs.Create(JoinWithUserDir(".tsuru_target"))
+	f, _ = rfs.Create(JoinWithUserDir(".tsuru", "target"))
 	f.Write([]byte("http://tsuru.google.com"))
 	f.Close()
 	fsystem = rfs

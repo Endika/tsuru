@@ -17,6 +17,7 @@ import (
 	"github.com/tsuru/tsuru/auth/native"
 	"github.com/tsuru/tsuru/db"
 	"github.com/tsuru/tsuru/db/dbtest"
+	"github.com/tsuru/tsuru/permission"
 	"github.com/tsuru/tsuru/provision"
 	"github.com/tsuru/tsuru/provision/provisiontest"
 	"github.com/tsuru/tsuru/queue"
@@ -36,9 +37,6 @@ type S struct {
 	team        *auth.Team
 	user        *auth.User
 	token       auth.Token
-	adminteam   *auth.Team
-	adminuser   *auth.User
-	admintoken  auth.Token
 	provisioner *provisiontest.FakeProvisioner
 	Pool        string
 }
@@ -69,21 +67,17 @@ func (c *hasAccessToChecker) Check(params []interface{}, names []string) (bool, 
 var HasAccessTo check.Checker = &hasAccessToChecker{}
 
 func (s *S) createUserAndTeam(c *check.C) {
-	s.user = &auth.User{Email: "whydidifall@thewho.com", Password: "123456", Quota: quota.Unlimited}
-	_, err := nativeScheme.Create(s.user)
+	// TODO: remove this token from the suite, each test should create their
+	// own user with specific permissions.
+	s.token = customUserWithPermission(c, "super-root-toremove", permission.Permission{
+		Scheme:  permission.PermAll,
+		Context: permission.Context(permission.CtxGlobal, ""),
+	})
+	var err error
+	s.user, err = s.token.User()
 	c.Assert(err, check.IsNil)
-	s.adminuser = &auth.User{Email: "myadmin@arrakis.com", Password: "123456", Quota: quota.Unlimited}
-	_, err = nativeScheme.Create(s.adminuser)
-	c.Assert(err, check.IsNil)
-	s.team = &auth.Team{Name: "tsuruteam", Users: []string{s.user.Email}}
+	s.team = &auth.Team{Name: "tsuruteam"}
 	err = s.conn.Teams().Insert(s.team)
-	c.Assert(err, check.IsNil)
-	s.adminteam = &auth.Team{Name: "admin", Users: []string{s.adminuser.Email}}
-	err = s.conn.Teams().Insert(s.adminteam)
-	c.Assert(err, check.IsNil)
-	s.token, err = nativeScheme.Login(map[string]string{"email": s.user.Email, "password": "123456"})
-	c.Assert(err, check.IsNil)
-	s.admintoken, err = nativeScheme.Login(map[string]string{"email": s.adminuser.Email, "password": "123456"})
 	c.Assert(err, check.IsNil)
 }
 
@@ -117,7 +111,6 @@ func (s *S) SetUpTest(c *check.C) {
 	err = provision.AddPool(opts)
 	c.Assert(err, check.IsNil)
 	repository.Manager().CreateUser(s.user.Email)
-	repository.Manager().CreateUser(s.adminuser.Email)
 	factory, err := queue.Factory()
 	c.Assert(err, check.IsNil)
 	factory.Reset()
@@ -130,11 +123,47 @@ func (s *S) TearDownTest(c *check.C) {
 	context.Purge(-1)
 }
 
+func (s *S) TestDownSuite(c *check.C) {
+	conn, err := db.Conn()
+	c.Assert(err, check.IsNil)
+	defer conn.Close()
+	conn.Apps().Database.DropDatabase()
+	logConn, err := db.LogConn()
+	c.Assert(err, check.IsNil)
+	defer logConn.Close()
+	logConn.Logs("myapp").Database.DropDatabase()
+}
+
 func (s *S) getTestData(p ...string) io.ReadCloser {
 	p = append([]string{}, ".", "testdata")
 	fp := path.Join(p...)
 	f, _ := os.OpenFile(fp, os.O_RDONLY, 0)
 	return f
+}
+
+func userWithPermission(c *check.C, perm ...permission.Permission) auth.Token {
+	return customUserWithPermission(c, "majortom", perm...)
+}
+
+func customUserWithPermission(c *check.C, baseName string, perm ...permission.Permission) auth.Token {
+	user := &auth.User{Email: baseName + "@groundcontrol.com", Password: "123456", Quota: quota.Unlimited}
+	_, err := nativeScheme.Create(user)
+	c.Assert(err, check.IsNil)
+	token, err := nativeScheme.Login(map[string]string{"email": user.Email, "password": "123456"})
+	c.Assert(err, check.IsNil)
+	for _, p := range perm {
+		role, err := permission.NewRole(baseName+p.Scheme.FullName()+p.Context.Value, string(p.Context.CtxType))
+		c.Assert(err, check.IsNil)
+		name := p.Scheme.FullName()
+		if name == "" {
+			name = "*"
+		}
+		err = role.AddPermissions(name)
+		c.Assert(err, check.IsNil)
+		err = user.AddRole(role.Name, p.Context.Value)
+		c.Assert(err, check.IsNil)
+	}
+	return token
 }
 
 func resetHandlers() {

@@ -1,4 +1,4 @@
-// Copyright 2015 tsuru authors. All rights reserved.
+// Copyright 2016 tsuru authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -272,6 +272,34 @@ func (s *S) TestContainerCreateUndefinedUser(c *check.C) {
 	c.Assert(container.Config.User, check.Equals, "")
 }
 
+func (s *S) TestContainerCreateOverwriteEntrypoint(c *check.C) {
+	config.Set("host", "my.cool.tsuru.addr:8080")
+	defer config.Unset("host")
+	app := provisiontest.NewFakeApp("app-name", "brainfuck", 1)
+	img := "tsuru/brainfuck:latest"
+	s.p.Cluster().PullImage(docker.PullImageOptions{Repository: img}, docker.AuthConfiguration{})
+	cont := Container{
+		Name:    "myName",
+		AppName: app.GetName(),
+		Type:    app.GetPlatform(),
+		Status:  "created",
+	}
+	err := cont.Create(&CreateArgs{
+		Deploy:      true,
+		App:         app,
+		ImageID:     img,
+		Commands:    []string{"docker", "run"},
+		Provisioner: s.p,
+	})
+	c.Assert(err, check.IsNil)
+	defer s.removeTestContainer(&cont)
+	dcli, err := docker.NewClient(s.server.URL())
+	c.Assert(err, check.IsNil)
+	container, err := dcli.InspectContainer(cont.ID)
+	c.Assert(err, check.IsNil)
+	c.Assert(container.Config.Entrypoint, check.DeepEquals, []string{"/bin/bash", "-c"})
+}
+
 func (s *S) TestContainerNetworkInfo(c *check.C) {
 	inspectOut := `{
 	"NetworkSettings": {
@@ -326,7 +354,7 @@ func (s *S) TestContainerSetStatusStarted(c *check.C) {
 	err := coll.Insert(container)
 	c.Assert(err, check.IsNil)
 	defer coll.Remove(bson.M{"id": container.ID})
-	err = container.SetStatus(s.p, provision.StatusStarted.String(), true)
+	err = container.SetStatus(s.p, provision.StatusStarted, true)
 	c.Assert(err, check.IsNil)
 	var c2 Container
 	err = coll.Find(bson.M{"id": container.ID}).One(&c2)
@@ -336,7 +364,7 @@ func (s *S) TestContainerSetStatusStarted(c *check.C) {
 	c2.LastSuccessStatusUpdate = time.Time{}
 	err = coll.Update(bson.M{"id": c2.ID}, c2)
 	c.Assert(err, check.IsNil)
-	err = c2.SetStatus(s.p, provision.StatusStarting.String(), true)
+	err = c2.SetStatus(s.p, provision.StatusStarting, true)
 	c.Assert(err, check.IsNil)
 	err = coll.Find(bson.M{"id": container.ID}).One(&c2)
 	c.Assert(err, check.IsNil)
@@ -352,7 +380,7 @@ func (s *S) TestContainerSetStatusBuilding(c *check.C) {
 	defer coll.Close()
 	coll.Insert(c1)
 	defer coll.Remove(bson.M{"id": c1.ID})
-	err := c1.SetStatus(s.p, provision.StatusStarted.String(), true)
+	err := c1.SetStatus(s.p, provision.StatusStarted, true)
 	c.Assert(err, check.Equals, mgo.ErrNotFound)
 	var c2 Container
 	err = coll.Find(bson.M{"id": c1.ID}).One(&c2)
@@ -371,7 +399,7 @@ func (s *S) TestContainerSetStatusNoUpdate(c *check.C) {
 	defer coll.Close()
 	coll.Insert(c1)
 	defer coll.Remove(bson.M{"id": c1.ID})
-	err := c1.SetStatus(s.p, provision.StatusStarted.String(), false)
+	err := c1.SetStatus(s.p, provision.StatusStarted, false)
 	c.Assert(err, check.IsNil)
 }
 
@@ -596,7 +624,7 @@ func (s *S) TestContainerStopReturnsNilWhenContainerAlreadyMarkedAsStopped(c *ch
 	cont, err := s.newContainer(newContainerOpts{}, nil)
 	c.Assert(err, check.IsNil)
 	defer s.removeTestContainer(cont)
-	cont.SetStatus(s.p, provision.StatusStopped.String(), true)
+	cont.SetStatus(s.p, provision.StatusStopped, true)
 	err = cont.Stop(s.p)
 	c.Assert(err, check.IsNil)
 }

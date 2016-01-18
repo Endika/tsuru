@@ -1,4 +1,4 @@
-// Copyright 2015 tsuru authors. All rights reserved.
+// Copyright 2016 tsuru authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -14,6 +14,7 @@ import (
 	"github.com/tsuru/docker-cluster/cluster"
 	"github.com/tsuru/tsuru/db"
 	"github.com/tsuru/tsuru/db/dbtest"
+	"github.com/tsuru/tsuru/net"
 	"github.com/tsuru/tsuru/provision/docker/container"
 	"github.com/tsuru/tsuru/provision/provisiontest"
 	"gopkg.in/check.v1"
@@ -40,6 +41,13 @@ func (s *S) SetUpTest(c *check.C) {
 	c.Assert(err, check.IsNil)
 	defer conn.Close()
 	dbtest.ClearAllCollections(conn.Apps().Database)
+}
+
+func (s *S) TearDownSuite(c *check.C) {
+	conn, err := db.Conn()
+	c.Assert(err, check.IsNil)
+	defer conn.Close()
+	conn.Apps().Database.DropDatabase()
 }
 
 func (s *S) TestNewFakeDockerProvisioner(c *check.C) {
@@ -363,9 +371,11 @@ func (s *S) TestListContainersPreparedResult(c *check.C) {
 	c.Assert(err, check.IsNil)
 	defer p.Destroy()
 	p.PrepareListResult([]container.Container{{ID: "cont1"}}, nil)
-	query := bson.M{"id": "abc123", "hostaddr": "127.0.0.1"}
+	query := bson.M{"id": "cont1"}
 	containers, err := p.ListContainers(query)
 	c.Assert(err, check.IsNil)
+	c.Assert(containers, check.HasLen, 1)
+	containers[0].MongoID = bson.ObjectId("")
 	c.Assert(containers, check.DeepEquals, []container.Container{{ID: "cont1"}})
 	c.Assert(p.Queries(), check.DeepEquals, []bson.M{query})
 }
@@ -409,5 +419,5 @@ func (s *S) TestStartContainers(c *check.C) {
 	})
 	c.Assert(err, check.IsNil)
 	c.Assert(containers, check.HasLen, 3)
-	c.Assert(p.Containers(urlToHost(p.Servers()[0].URL())), check.DeepEquals, containers)
+	c.Assert(p.Containers(net.URLToHost(p.Servers()[0].URL())), check.DeepEquals, containers)
 }
